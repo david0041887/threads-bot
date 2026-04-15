@@ -1,0 +1,195 @@
+"""
+ai_generator.py
+Claude AI 內容生成 — 發文草稿 & 留言回覆 & 自動主題產生
+"""
+
+import os
+import json
+import logging
+from typing import Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
+MODEL = "claude-sonnet-4-6"
+
+
+ACCOUNT_PERSONA = os.getenv("ACCOUNT_PERSONA", """
+你是「保險視界」的經營者，一個懂科技、懂保險的業務人員。
+
+發文核心策略：
+- 用「反差感」吸引目光：先講大家對保險的誤解或恐懼，再翻轉觀點
+- 不直接推銷商品，改以知識、觀點、生活情境切入
+- 讓讀者自己產生「我需要了解更多」的念頭
+- 遵守業務員管理規範：不得以不實或誇大方式描述保險商品，不得保證獲利
+
+發文風格：
+- 開頭用一句話製造反差或好奇心
+- 內容有觀點、有邏輯，不說廢話
+- 結尾留下思考問題或互動鉤子
+- 繁體中文，語氣像在跟朋友說話，不像在上課
+- 絕對不加任何 hashtag、#字號
+
+禁忌：
+- 失能險已停售，不得提及
+- 副本實支已停售，不得提及
+- 不講重大疾病險，只講重大傷病險
+""").strip()
+
+
+def _call_claude(system: str, user: str, max_tokens: int = 1000) -> str:
+    headers = {
+        "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {
+        "model": MODEL,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+    resp = httpx.post(ANTHROPIC_API, headers=headers, json=body, timeout=60)
+    resp.raise_for_status()
+    return resp.json()["content"][0]["text"].strip()
+
+
+def generate_daily_topics() -> list[dict]:
+    system = f"""{ACCOUNT_PERSONA}
+
+你的任務是產生今日 Threads 發文的主題清單。
+輸出嚴格為 JSON array，不加任何說明文字，不加 markdown 符號。
+JSON 格式：[{{"title":"主題標題","summary":"一句話說明角度","url":""}}]
+"""
+    user = """請產生 5 個適合今日發文的保險相關主題。
+要求：
+- 從以下方向輪流選取：壽險活用、遺產稅務規劃、投資型保單優勢、心理學與保險決策、醫療保障觀念
+- 有反差感或能引發好奇心
+- 符合台灣保險市場現況
+- 每個主題角度不同
+
+輸出 JSON array，5 個物件。"""
+
+    try:
+        raw = _call_claude(system, user, max_tokens=1000)
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except Exception as e:
+        logger.error(f"主題生成失敗: {e}")
+        return [
+            {"title": "壽險不是等死才用", "summary": "保單借款與減額繳清的活用方式", "url": ""},
+            {"title": "遺產稅的合法節稅工具", "summary": "保險金不計入遺產的關鍵知識", "url": ""},
+            {"title": "投資型保單被誤解了嗎？", "summary": "分離帳戶與一般帳戶的本質差異", "url": ""},
+            {"title": "為什麼人們總是拖延買保險？", "summary": "現時偏誤與保險決策的心理學", "url": ""},
+            {"title": "重大傷病險 vs 醫療險", "summary": "兩者的理賠邏輯完全不同", "url": ""},
+        ]
+
+
+def generate_post_drafts(source_articles: list[dict], count: int = 3) -> list[dict]:
+    articles_text = "\n\n".join(
+        f"[{i+1}] 主題：{a['title']}\n角度：{a.get('summary','')}"
+        for i, a in enumerate(source_articles[:5])
+    )
+
+    system = f"""{ACCOUNT_PERSONA}
+
+你的任務是根據提供的主題，生成 Threads 發文草稿。
+
+規則：
+- 每篇草稿不超過 450 字（含標點）
+- 絕對不加任何 hashtag 或 # 字號
+- 開頭要有反差感或吸睛的第一句話
+- 不直接推銷保險商品
+- 結尾用問句引發互動
+- 輸出嚴格為 JSON array，不加任何說明文字，不加 markdown 符號
+- JSON 格式：[{{"draft":"內文","angle":"切入角度","source_title":"主題標題"}}]
+"""
+
+    user = f"""請根據以下主題，生成 {count} 篇風格各異的 Threads 發文草稿：
+
+{articles_text}
+
+輸出 JSON array，{count} 個物件。"""
+
+    raw = _call_claude(system, user, max_tokens=2000)
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    drafts = json.loads(clean)
+    return drafts[:count]
+
+
+def generate_reply(
+    post_text: str,
+    comment_text: str,
+    commenter_username: str,
+    conversation_history: Optional[list[dict]] = None,
+) -> str:
+    history_text = ""
+    if conversation_history:
+        history_text = "\n".join(
+            f"@{m['username']}: {m['text']}"
+            for m in conversation_history[-4:]
+        )
+
+    system = f"""{ACCOUNT_PERSONA}
+
+你正在回覆 Threads 上的留言。
+
+規則：
+- 回覆自然、口語、有溫度，不像機器人
+- 不超過 150 字
+- 直接輸出回覆文字，不加任何說明或引號
+- 不加 hashtag
+- 若留言是問題，給出實質回答；若是閒聊，輕鬆回應
+- 若留言有購買意向或詢問細節，自然引導對方私訊了解
+"""
+
+    context = f"""我的貼文內容：
+{post_text}
+
+{"對話記錄：" + history_text if history_text else ""}
+
+@{commenter_username} 留言說：
+{comment_text}
+
+請回覆這則留言："""
+
+    return _call_claude(system, context, max_tokens=300)
+
+
+def generate_proactive_reply(post_text: str, keyword: str) -> str:
+    """
+    針對他人保險相關貼文生成主動回覆。
+    回傳回覆文字，若內容不適合回覆則回傳空字串。
+    """
+    system = f"""{ACCOUNT_PERSONA}
+
+你正在主動回覆 Threads 上與保險相關的公開貼文。
+
+嚴格規則：
+- 只做客觀知識補充，不做商品比較
+- 不提具體保險公司或商品名稱
+- 不招攬，不說「我可以幫你規劃」「歡迎聯絡我」等直接招攬語
+- 結尾用「如有疑問可向信任的業務討論」引導對方主動聯繫
+- 不超過 120 字
+- 繁體中文，自然口語
+- 若貼文內容不適合回覆（廣告、與保險無關、已有完整正確答案），輸出空字串
+- 直接輸出回覆文字或空字串，不加任何說明
+"""
+
+    user = f"""搜尋關鍵字：{keyword}
+
+他人的 Threads 貼文內容：
+{post_text}
+
+請判斷是否適合回覆，並生成補充知識的回覆（或空字串）："""
+
+    try:
+        result = _call_claude(system, user, max_tokens=300)
+        if result.strip() in ["", "空字串", "不適合回覆"]:
+            return ""
+        return result.strip()
+    except Exception as e:
+        logger.error(f"主動回覆生成失敗: {e}")
+        return ""
