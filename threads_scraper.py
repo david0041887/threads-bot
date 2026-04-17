@@ -308,92 +308,135 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
             await browser.close()
 
 
-async def _ui_reply_to_post(page, post_url: str, reply_text: str) -> bool:
+async def _ui_reply_to_post(page, post_url: str, reply_text: str, screenshot_path: str = "") -> bool:
     """
     使用 Playwright 瀏覽器 UI 在 Threads 串文底下回覆。
-    回傳 True 表示成功送出。
+    回傳 True 表示成功送出。screenshot_path 非空時，失敗會存截圖。
     """
+    async def _screenshot(label: str):
+        if screenshot_path:
+            try:
+                await page.screenshot(path=screenshot_path, full_page=False)
+                logger.info(f"[海巡-UI] 截圖已存 ({label}): {screenshot_path}")
+            except Exception:
+                pass
+
     try:
         logger.info(f"[海巡-UI] 前往貼文: {post_url}")
         await page.goto(post_url, wait_until="domcontentloaded", timeout=25000)
         await asyncio.sleep(3)
 
-        # 確認頁面已載入（找到貼文容器）
         try:
             await page.wait_for_selector('a[href*="/post/"]', timeout=10000)
         except Exception:
             logger.warning(f"[海巡-UI] 頁面未正確載入: {post_url}")
+            await _screenshot("page-load-fail")
             return False
 
-        # 找回覆按鈕：Threads UI 的 svg aria-label 或 data-testid
-        reply_btn = None
-        for sel in [
+        await _screenshot("page-loaded")
+
+        # 找回覆按鈕 — Threads 用 SVG aria-label，可能是 Reply / Comment
+        # 點擊父容器 (div[role="button"] 或 button) 而非直接點 SVG
+        clicked = False
+        reply_btn_selectors = [
             'svg[aria-label="Reply"]',
+            'svg[aria-label="Comment"]',
             'svg[aria-label="回覆"]',
+            'svg[aria-label="留言"]',
             '[data-testid="reply-button"]',
-            'div[role="button"] svg[aria-label*="eply"]',
-        ]:
-            reply_btn = await page.query_selector(sel)
-            if reply_btn:
-                break
+            '[data-testid="comment-button"]',
+            '[aria-label="Reply"]',
+            '[aria-label="Comment"]',
+        ]
+        for sel in reply_btn_selectors:
+            el = await page.query_selector(sel)
+            if el:
+                # 點擊最近的可點擊祖先
+                try:
+                    await el.evaluate("""el => {
+                        const btn = el.closest('div[role="button"]') || el.closest('button') || el.parentElement;
+                        if (btn) btn.click();
+                    }""")
+                    clicked = True
+                    logger.info(f"[海巡-UI] 已點擊回覆按鈕 ({sel})")
+                    break
+                except Exception as ex:
+                    logger.debug(f"[海巡-UI] 點擊失敗 ({sel}): {ex}")
 
-        if not reply_btn:
-            # 嘗試找第一個 article 內的 svg 按鈕群組的第一個 button
-            reply_btn = await page.query_selector('article div[role="button"]:first-of-type')
+        if not clicked:
+            # 最後備用：找 article 內第二個 div[role="button"]（通常是留言）
+            btns = await page.query_selector_all('article div[role="button"], article button')
+            if len(btns) >= 2:
+                await btns[1].click()
+                clicked = True
+                logger.info("[海巡-UI] 用備用選擇器點擊第二個按鈕")
 
-        if not reply_btn:
+        if not clicked:
             logger.warning("[海巡-UI] 找不到回覆按鈕")
+            await _screenshot("no-reply-btn")
             return False
 
-        await reply_btn.click()
-        await asyncio.sleep(1.5)
-
-        # 找回覆輸入框（contenteditable 或 textarea）
+        # 等待輸入框出現
         input_box = None
-        for sel in [
+        input_selectors = [
             '[role="textbox"][aria-label*="eply"]',
+            '[role="textbox"][aria-label*="omment"]',
             '[role="textbox"][aria-label*="覆"]',
+            '[role="textbox"][aria-label*="言"]',
+            '[role="textbox"]',
             '[contenteditable="true"]',
             'textarea',
-        ]:
-            input_box = await page.query_selector(sel)
-            if input_box:
-                break
+        ]
+        for sel in input_selectors:
+            try:
+                input_box = await page.wait_for_selector(sel, timeout=5000)
+                if input_box:
+                    logger.info(f"[海巡-UI] 找到輸入框 ({sel})")
+                    break
+            except Exception:
+                pass
 
         if not input_box:
             logger.warning("[海巡-UI] 找不到輸入框")
+            await _screenshot("no-input-box")
             return False
 
+        await _screenshot("input-ready")
         await input_box.click()
+        await asyncio.sleep(0.3)
+        await input_box.type(reply_text, delay=25)
         await asyncio.sleep(0.5)
-        await input_box.type(reply_text, delay=30)
-        await asyncio.sleep(0.5)
+        await _screenshot("text-typed")
 
         # 找送出按鈕
         post_btn = None
-        for sel in [
+        submit_selectors = [
+            '[aria-label="Post"]',
+            '[aria-label="送出"]',
+            '[aria-label="Reply"]',
             'div[role="button"][aria-label*="Post"]',
-            'div[role="button"][aria-label*="送出"]',
             'button[type="submit"]',
-            # 備用：找含「Post」文字的按鈕
-        ]:
+        ]
+        for sel in submit_selectors:
             post_btn = await page.query_selector(sel)
             if post_btn:
+                logger.info(f"[海巡-UI] 找到送出按鈕 ({sel})")
                 break
 
-        if not post_btn:
-            # 備用：用 Ctrl+Enter 送出
+        if post_btn:
+            await post_btn.click()
+        else:
             logger.info("[海巡-UI] 找不到送出鍵，改用 Ctrl+Enter")
             await input_box.press("Control+Enter")
-        else:
-            await post_btn.click()
 
         await asyncio.sleep(3)
-        logger.info(f"[海巡-UI] 回覆送出成功: {post_url}")
+        await _screenshot("after-submit")
+        logger.info(f"[海巡-UI] 回覆送出: {post_url}")
         return True
 
     except Exception as e:
         logger.error(f"[海巡-UI] 回覆失敗: {e}")
+        await _screenshot("exception")
         return False
 
 

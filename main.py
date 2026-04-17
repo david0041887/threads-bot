@@ -511,6 +511,88 @@ async def list_pending_jobs():
     return {jid: {"status": j["status"], "draft_count": len(j.get("drafts", []))} for jid, j in pending_jobs.items()}
 
 
+_DEBUG_SCREENSHOT_PATH = "/tmp/ui_debug.png"
+
+
+@app.post("/admin/test-ui-reply")
+async def test_ui_reply(request: Request):
+    """
+    測試 UI 回覆功能。
+    Body: {"post_url": "...", "reply_text": "...", "dry_run": true}
+    dry_run=true (預設) 只截圖，不實際送出回覆。
+    截圖儲存於 /tmp/ui_debug.png，可透過 GET /admin/debug-screenshot 查看。
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return {"error": "Playwright 不可用"}
+    body = await request.json()
+    post_url = body.get("post_url", "")
+    reply_text = body.get("reply_text", "（測試用，請忽略）")
+    dry_run = body.get("dry_run", True)
+    if not post_url:
+        return {"error": "缺少 post_url"}
+
+    import os as _os
+    from playwright.async_api import async_playwright
+    from threads_scraper import _ui_reply_to_post
+    import json as _json, asyncio as _asyncio
+
+    steps = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 900},
+            )
+            cookies_env = _os.environ.get("THREADS_COOKIES", "")
+            if cookies_env:
+                raw = _json.loads(cookies_env)
+                pw_cookies = []
+                for c in raw:
+                    pw = {"name": c["name"], "value": c["value"],
+                          "domain": c.get("domain", ".threads.com"), "path": c.get("path", "/")}
+                    exp = c.get("expirationDate") or c.get("expires")
+                    if exp and exp > 0:
+                        pw["expires"] = int(exp)
+                    ss = c.get("sameSite") or "Lax"
+                    pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), "Lax")
+                    pw_cookies.append(pw)
+                await context.add_cookies(pw_cookies)
+                steps.append(f"載入 {len(pw_cookies)} 個 cookies")
+
+            page = await context.new_page()
+            await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=25000)
+            await _asyncio.sleep(2)
+            logged_in = "login" not in page.url.lower()
+            steps.append(f"登入: {'已登入' if logged_in else '未登入'} ({page.url})")
+
+            if dry_run:
+                await page.goto(post_url, wait_until="domcontentloaded", timeout=25000)
+                await _asyncio.sleep(3)
+                await page.screenshot(path=_DEBUG_SCREENSHOT_PATH, full_page=False)
+                steps.append(f"dry_run 截圖完成 → GET /admin/debug-screenshot 查看")
+                result = None
+            else:
+                result = await _ui_reply_to_post(page, post_url, reply_text, screenshot_path=_DEBUG_SCREENSHOT_PATH)
+                steps.append(f"UI 回覆: {'成功' if result else '失敗'} → GET /admin/debug-screenshot 查看截圖")
+
+            await browser.close()
+
+        return {"success": result, "dry_run": dry_run, "steps": steps}
+    except Exception as e:
+        return {"error": str(e), "steps": steps}
+
+
+@app.get("/admin/debug-screenshot")
+async def debug_screenshot():
+    """查看最新一次 test-ui-reply 的截圖。"""
+    import os as _os
+    from fastapi.responses import FileResponse
+    if not _os.path.exists(_DEBUG_SCREENSHOT_PATH):
+        return {"error": "截圖不存在，請先呼叫 POST /admin/test-ui-reply"}
+    return FileResponse(_DEBUG_SCREENSHOT_PATH, media_type="image/png")
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
