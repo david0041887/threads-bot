@@ -254,10 +254,8 @@ async def proactive_patrol_job(force: bool = False):
                 continue
 
             try:
-                post_url = f"https://www.threads.com/@{post.username}/post/{post.shortcode}"
-                actual_id = client.get_post_id_from_url(post_url) or post.id
-                logger.info(f"[海巡] oEmbed id={actual_id} (shortcode={post.shortcode}, fallback={post.id})")
-                new_reply_id = client.reply_to_comment(reply_id=actual_id, text=reply_text)
+                logger.info(f"[海巡] 使用 media_id={post.id} (shortcode={post.shortcode})")
+                new_reply_id = client.reply_to_comment(reply_id=post.id, text=reply_text)
                 replied += 1
                 daily_proactive_count[session] += 1
                 logger.info(f"[海巡] 已回覆 @{post.username} (shortcode={post.shortcode})")

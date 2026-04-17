@@ -112,6 +112,25 @@ async def _ensure_logged_in(page, context) -> bool:
     return True
 
 
+def _extract_pk_map(json_text: str) -> dict[str, str]:
+    """從 API JSON 回應中提取 shortcode → pk (media_id) 對應表"""
+    pk_map: dict[str, str] = {}
+    try:
+        # 找所有 "code":"SHORTCODE" 並在附近找 "pk":"ID"
+        for m in re.finditer(r'"code"\s*:\s*"([A-Za-z0-9_-]{6,})"', json_text):
+            code = m.group(1)
+            # 在 code 前後 300 個字元內找 pk
+            start = max(0, m.start() - 300)
+            end = min(len(json_text), m.end() + 300)
+            snippet = json_text[start:end]
+            pk_match = re.search(r'"pk"\s*:\s*"?(\d{12,20})"?', snippet)
+            if pk_match:
+                pk_map[code] = pk_match.group(1)
+    except Exception:
+        pass
+    return pk_map
+
+
 async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list[ScrapedPost]:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -136,6 +155,21 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
 
         page = await context.new_page()
         posts: list[ScrapedPost] = []
+        # shortcode → 真實 media_id（從 API 回應攔截）
+        api_pk_map: dict[str, str] = {}
+
+        async def _capture_pk(response):
+            try:
+                ct = response.headers.get("content-type", "")
+                if "json" not in ct:
+                    return
+                body = await response.text()
+                if '"pk"' in body and '"code"' in body:
+                    api_pk_map.update(_extract_pk_map(body))
+            except Exception:
+                pass
+
+        page.on("response", _capture_pk)
 
         try:
             if not await _ensure_logged_in(page, context):
@@ -161,6 +195,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                 await page.evaluate("window.scrollBy(0, window.innerHeight)")
                 await asyncio.sleep(1.5)
 
+            logger.info(f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk 對應")
             my_username = os.environ.get("THREADS_USERNAME", "").lower()
 
             # 取得所有貼文連結，從連結往上找貼文容器
@@ -209,7 +244,13 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
 
                     raw_text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
-                    media_id = (result.get("mediaId") or "").strip() or _shortcode_to_id(shortcode)
+                    # 優先用 API 攔截到的 pk，其次 DOM 屬性，最後 shortcode 換算
+                    media_id = (
+                        api_pk_map.get(shortcode)
+                        or (result.get("mediaId") or "").strip()
+                        or _shortcode_to_id(shortcode)
+                    )
+                    logger.debug(f"[海巡] shortcode={shortcode} media_id={media_id} (api_map={bool(api_pk_map.get(shortcode))})")
 
                     # 去除開頭的帳號名稱、時間戳、hashtag 等短行雜訊
                     lines = raw_text.splitlines()
