@@ -45,31 +45,36 @@ class ScrapedPost:
 
 
 async def _ensure_logged_in(page, context) -> bool:
-    await page.goto("https://www.threads.net/", wait_until="domcontentloaded", timeout=30000)
+    # 直接進 /login，若已登入會被重導到首頁
+    await page.goto("https://www.threads.net/login", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(2)
-    logger.info(f"[海巡] threads.net 目前 URL: {page.url}")
+    logger.info(f"[海巡] /login 目前 URL: {page.url}")
 
-    if "login" in page.url.lower():
-        username = os.environ.get("THREADS_USERNAME", "")
-        password = os.environ.get("THREADS_PASSWORD", "")
-        if not username or not password:
-            logger.error("THREADS_USERNAME / THREADS_PASSWORD 未設定，無法登入爬蟲")
-            return False
-        try:
-            await page.goto("https://www.threads.net/login", wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_selector('input[autocomplete="username"]', timeout=15000)
-            await page.fill('input[autocomplete="username"]', username)
-            await page.fill('input[type="password"]', password)
-            await page.press('input[type="password"]', "Enter")
-            await page.wait_for_url(re.compile(r"threads\.net(?!/login)"), timeout=30000)
-            Path(COOKIES_FILE).write_text(json.dumps(await context.cookies()))
-            logger.info("Threads 登入成功，已儲存 cookies")
-            return True
-        except Exception as e:
-            logger.error(f"Threads 登入失敗: {e}")
-            return False
+    # 若被重導離開 login 頁面，表示 cookies 有效，已登入
+    if "login" not in page.url.lower():
+        logger.info("[海巡] cookies 有效，已登入")
+        return True
 
-    return True
+    # 需要重新登入
+    username = os.environ.get("THREADS_USERNAME", "")
+    password = os.environ.get("THREADS_PASSWORD", "")
+    if not username or not password:
+        logger.error("[海巡] THREADS_USERNAME / THREADS_PASSWORD 未設定")
+        return False
+
+    logger.info(f"[海巡] 嘗試登入帳號: {username}")
+    try:
+        await page.wait_for_selector('input[autocomplete="username"]', timeout=15000)
+        await page.fill('input[autocomplete="username"]', username)
+        await page.fill('input[type="password"]', password)
+        await page.press('input[type="password"]', "Enter")
+        await page.wait_for_url(re.compile(r"threads\.net(?!/login)"), timeout=30000)
+        Path(COOKIES_FILE).write_text(json.dumps(await context.cookies()))
+        logger.info("[海巡] 登入成功，已儲存 cookies")
+        return True
+    except Exception as e:
+        logger.error(f"[海巡] 登入失敗: {e}")
+        return False
 
 
 async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list[ScrapedPost]:
