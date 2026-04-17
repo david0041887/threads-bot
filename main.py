@@ -347,31 +347,58 @@ async def approve_draft(job_id: str, choice: str):
 
 @app.post("/webhook/telegram")
 async def telegram_message_handler(request: Request):
+    import asyncio, re as _re
     payload = await request.json()
     text = payload.get("message", {}).get("text", "").strip()
-    import re
-    m = re.match(r"選\s*([123])\s+(\w+)", text)
+
+    # ── 海巡控制 ──────────────────────────────────────
+    if text == "海巡暫停":
+        try:
+            scheduler.remove_job("proactive_patrol")
+        except Exception:
+            pass
+        try:
+            scheduler.remove_job("poll_replies")
+        except Exception:
+            pass
+        send_telegram("⏸ 海巡與留言回覆已暫停")
+        return JSONResponse({"ok": True})
+
+    if text == "海巡繼續":
+        try:
+            scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
+            scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
+            send_telegram("▶️ 海巡與留言回覆已恢復（每 15 分鐘海巡一次）")
+        except Exception as e:
+            send_telegram(f"❌ 恢復失敗: {e}")
+        return JSONResponse({"ok": True})
+
+    # ── 草稿審核 ──────────────────────────────────────
+    m = _re.match(r"選\s*([123])\s+(\w+)", text)
     if m:
         result = await approve_draft(job_id=m.group(2), choice=m.group(1))
         if result.get("status") == "published":
             send_telegram(f"✅ 已發文！post_id: {result.get('post_id')}")
         return JSONResponse({"ok": True})
-    m2 = re.match(r"跳過\s+(\w+)", text)
+    m2 = _re.match(r"跳過\s+(\w+)", text)
     if m2:
         await approve_draft(job_id=m2.group(1), choice="skip")
         send_telegram("⏭ 今日發文已跳過")
         return JSONResponse({"ok": True})
-    m3 = re.match(r"回覆\s+(\w+)", text)
+
+    # ── 留言回覆審核 ──────────────────────────────────
+    m3 = _re.match(r"回覆\s+(\w+)", text)
     if m3:
         result = await approve_reply(reply_job_id=m3.group(1), action="send")
         if result.get("status") == "replied":
             send_telegram("✅ 回覆已發出")
         return JSONResponse({"ok": True})
-    m4 = re.match(r"略過\s+(\w+)", text)
+    m4 = _re.match(r"略過\s+(\w+)", text)
     if m4:
         await approve_reply(reply_job_id=m4.group(1), action="skip")
         send_telegram("⏭ 已略過此則留言")
         return JSONResponse({"ok": True})
+
     return JSONResponse({"ok": True})
 
 
