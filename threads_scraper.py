@@ -177,11 +177,17 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
         async def _capture_pk(response):
             try:
                 ct = response.headers.get("content-type", "")
-                if "json" not in ct:
+                if "json" not in ct and "javascript" not in ct:
                     return
                 body = await response.text()
-                if '"pk"' in body and '"code"' in body:
-                    api_pk_map.update(_extract_pk_map(body))
+                # 只處理包含 post 資料特徵的回應
+                has_id = '"pk"' in body or ('"id"' in body and len(body) > 500)
+                has_code = '"code"' in body or '"shortcode"' in body or '/post/' in body
+                if has_id and has_code:
+                    found = _extract_pk_map(body)
+                    if found:
+                        logger.debug(f"[海巡] 從 {response.url[:60]} 捕捉到 {len(found)} 個 pk")
+                        api_pk_map.update(found)
             except Exception:
                 pass
 
