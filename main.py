@@ -377,6 +377,26 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/admin/test-playwright")
+async def test_playwright():
+    if not PLAYWRIGHT_AVAILABLE:
+        return {"playwright": False, "reason": "import failed"}
+    try:
+        from playwright.async_api import async_playwright
+        import os
+        browser_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "not set")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            version = browser.version
+            await browser.close()
+        return {"playwright": True, "chromium_version": version, "browser_path": browser_path}
+    except Exception as e:
+        return {"playwright": False, "error": str(e), "browser_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "not set")}
+
+
 @app.get("/control", response_class=HTMLResponse)
 async def control_panel():
     return HTMLResponse(content=open("/app/control.html", "r", encoding="utf-8").read())
