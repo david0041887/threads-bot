@@ -328,8 +328,12 @@ async def manual_poll():
 
 @app.post("/admin/trigger-patrol")
 async def manual_patrol():
-    await proactive_patrol_job(force=True)
-    return {"status": "patrolled"}
+    try:
+        await proactive_patrol_job(force=True)
+        return {"status": "patrolled", "patrol_stats": daily_proactive_count}
+    except Exception as e:
+        logger.error(f"手動海巡失敗: {e}", exc_info=True)
+        return {"status": "error", "detail": str(e)}
 
 
 @app.get("/admin/patrol-stats")
