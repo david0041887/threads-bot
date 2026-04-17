@@ -395,6 +395,21 @@ async def patrol_stats():
     return {"daily_count": daily_proactive_count}
 
 
+@app.get("/admin/test-search")
+async def test_search(keyword: str = Query(default="保險")):
+    if not PLAYWRIGHT_AVAILABLE:
+        return {"error": "Playwright 不可用"}
+    try:
+        results = await search_threads_by_keyword_async(keyword=keyword, limit=5)
+        return {
+            "keyword": keyword,
+            "count": len(results),
+            "results": [{"shortcode": p.shortcode, "username": p.username, "text": p.text[:80]} for p in results],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/admin/pending-jobs")
 async def list_pending_jobs():
     return {jid: {"status": j["status"], "draft_count": len(j.get("drafts", []))} for jid, j in pending_jobs.items()}
