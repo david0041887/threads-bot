@@ -5,9 +5,11 @@ FastAPI 主程式 — 含主動海巡功能
 
 import os
 import uuid
+import json
 import logging
 import random
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, Query
@@ -30,8 +32,23 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 pending_jobs: dict[str, dict] = {}
 pending_replies: dict[str, dict] = {}
-processed_reply_ids: set = set()
 processed_proactive_ids: set = set()
+
+_PROCESSED_FILE = Path("processed_reply_ids.json")
+
+def _load_processed_ids() -> set:
+    try:
+        return set(json.loads(_PROCESSED_FILE.read_text()))
+    except Exception:
+        return set()
+
+def _save_processed_ids(ids: set):
+    try:
+        _PROCESSED_FILE.write_text(json.dumps(list(ids)))
+    except Exception as e:
+        logger.warning(f"無法儲存已處理留言 ID: {e}")
+
+processed_reply_ids: set = _load_processed_ids()
 
 SEARCH_KEYWORDS = [
     "保險", "壽險", "醫療險", "遺產稅", "節稅", "保費",
@@ -121,6 +138,7 @@ async def poll_replies_job():
                 if reply.id in processed_reply_ids:
                     continue
                 processed_reply_ids.add(reply.id)
+                _save_processed_ids(processed_reply_ids)
                 if not reply.text:
                     continue
                 logger.info(f"發現新留言: @{reply.username}: {reply.text[:50]}")
