@@ -145,12 +145,14 @@ async def poll_replies_job():
         client.close()
 
 
-async def proactive_patrol_job():
-    """每 15 分鐘執行一次，在對應時段主動回覆保險相關貼文"""
+async def proactive_patrol_job(force: bool = False):
+    """每 15 分鐘執行一次，在對應時段主動回覆保險相關貼文。force=True 可跳過時段限制。"""
     reset_daily_count()
     session = get_current_session()
     if not session:
-        return
+        if not force:
+            return
+        session = "morning"  # 強制執行時使用 morning 配額
 
     quota = PATROL_SCHEDULE[session]["count"]
     used = daily_proactive_count[session]
@@ -326,7 +328,7 @@ async def manual_poll():
 
 @app.post("/admin/trigger-patrol")
 async def manual_patrol():
-    await proactive_patrol_job()
+    await proactive_patrol_job(force=True)
     return {"status": "patrolled"}
 
 
