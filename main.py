@@ -110,7 +110,7 @@ def _ensure_chromium():
     if not _glob.glob(f"{browser_path}/**/chrome-headless-shell", recursive=True):
         logger.info(f"[Playwright] Chromium 未找到，正在安裝到 {browser_path} ...")
         result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
+            [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
             capture_output=True, text=True
         )
         if result.returncode == 0:
@@ -154,6 +154,7 @@ async def poll_replies_job():
     """每 2 分鐘輪詢自己貼文的留言"""
     logger.info("輪詢留言中...")
     client = get_client()
+    my_username = os.environ.get("THREADS_USERNAME", "").lower()
     try:
         posts = client.get_my_posts(limit=5)
         for post in posts:
@@ -161,6 +162,14 @@ async def poll_replies_job():
             for reply in replies:
                 if reply.id in processed_reply_ids:
                     continue
+                # 若我們帳號已回覆過此留言，直接標記處理並跳過
+                if my_username:
+                    sub_replies = client.get_sub_replies(reply.id)
+                    if any(sr.username.lower() == my_username for sr in sub_replies):
+                        processed_reply_ids.add(reply.id)
+                        _save_processed_ids(processed_reply_ids)
+                        logger.info(f"已跳過已回覆留言 @{reply.username}: {reply.text[:30]}")
+                        continue
                 processed_reply_ids.add(reply.id)
                 _save_processed_ids(processed_reply_ids)
                 if not reply.text:

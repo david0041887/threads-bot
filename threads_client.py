@@ -148,6 +148,23 @@ class ThreadsClient:
             )
         return replies
 
+    def get_sub_replies(self, reply_id: str, limit: int = 10) -> list[ThreadsReply]:
+        """取得某則留言底下的所有子回覆（用來確認我們是否已回覆）"""
+        fields = "id,text,timestamp,username,is_reply"
+        try:
+            data = self._get(f"{reply_id}/replies", {"fields": fields, "limit": limit})
+        except Exception:
+            return []
+        replies = []
+        for item in data.get("data", []):
+            replies.append(ThreadsReply(
+                id=item["id"],
+                text=item.get("text", ""),
+                timestamp=item.get("timestamp", ""),
+                username=item.get("username", ""),
+            ))
+        return replies
+
     def get_conversation(self, post_id: str) -> list[ThreadsReply]:
         """取得完整對話串（含巢狀回覆）"""
         fields = "id,text,timestamp,username,is_reply,replied_to,has_replies"
