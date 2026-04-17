@@ -410,6 +410,53 @@ async def test_search(keyword: str = Query(default="保險")):
         return {"error": str(e)}
 
 
+@app.get("/admin/test-login")
+async def test_login():
+    if not PLAYWRIGHT_AVAILABLE:
+        return {"error": "Playwright 不可用"}
+    from playwright.async_api import async_playwright
+    import asyncio
+    steps = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
+            page = await context.new_page()
+
+            await page.goto("https://www.threads.net/login", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2)
+            url_after_goto = page.url
+            steps.append(f"login URL: {url_after_goto}")
+
+            if "login" not in url_after_goto.lower():
+                steps.append("已登入（redirect 成功）")
+                await browser.close()
+                return {"logged_in": True, "steps": steps}
+
+            # 嘗試填寫帳密
+            username = os.environ.get("THREADS_USERNAME", "")
+            password = os.environ.get("THREADS_PASSWORD", "")
+            steps.append(f"username env: {'已設定' if username else '未設定'}, password env: {'已設定' if password else '未設定'}")
+
+            try:
+                await page.wait_for_selector('input[autocomplete="username"]', timeout=10000)
+                steps.append("找到 username input")
+                await page.fill('input[autocomplete="username"]', username)
+                await page.fill('input[type="password"]', password)
+                await page.press('input[type="password"]', "Enter")
+                await asyncio.sleep(5)
+                steps.append(f"送出後 URL: {page.url}")
+                logged_in = "login" not in page.url.lower()
+            except Exception as e:
+                steps.append(f"填表失敗: {e}")
+                logged_in = False
+
+            await browser.close()
+            return {"logged_in": logged_in, "steps": steps}
+    except Exception as e:
+        return {"error": str(e), "steps": steps}
+
+
 @app.get("/admin/pending-jobs")
 async def list_pending_jobs():
     return {jid: {"status": j["status"], "draft_count": len(j.get("drafts", []))} for jid, j in pending_jobs.items()}
