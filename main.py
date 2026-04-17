@@ -383,12 +383,21 @@ async def manual_poll():
 
 @app.post("/admin/trigger-patrol")
 async def manual_patrol():
+    import io, logging as _logging
+    buf = io.StringIO()
+    handler = _logging.StreamHandler(buf)
+    handler.setLevel(_logging.INFO)
+    for name in ("threads_scraper", "main"):
+        _logging.getLogger(name).addHandler(handler)
     try:
         await proactive_patrol_job(force=True)
-        return {"status": "patrolled", "patrol_stats": daily_proactive_count}
+        return {"status": "patrolled", "patrol_stats": daily_proactive_count, "logs": buf.getvalue()}
     except Exception as e:
         logger.error(f"手動海巡失敗: {e}", exc_info=True)
-        return {"status": "error", "detail": str(e)}
+        return {"status": "error", "detail": str(e), "logs": buf.getvalue()}
+    finally:
+        for name in ("threads_scraper", "main"):
+            _logging.getLogger(name).removeHandler(handler)
 
 
 @app.get("/admin/patrol-stats")
