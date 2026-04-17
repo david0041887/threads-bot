@@ -13,6 +13,8 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+from playwright.async_api import async_playwright
+
 logger = logging.getLogger(__name__)
 
 COOKIES_FILE = "threads_cookies.json"
@@ -67,8 +69,6 @@ async def _ensure_logged_in(page, context) -> bool:
 
 
 async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list[ScrapedPost]:
-    from playwright.async_api import async_playwright
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
