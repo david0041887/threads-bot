@@ -241,6 +241,7 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 - 繁體中文，自然口語
 - 若貼文內容不適合回覆（廣告、與保險無關、已有完整正確答案），輸出空字串
 - 直接輸出回覆文字或空字串，不加任何說明
+- 不要在文字中加 @username 或任何 @tag
 """
 
     user = f"""搜尋關鍵字：{keyword}
