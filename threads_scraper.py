@@ -47,6 +47,7 @@ class ScrapedPost:
 async def _ensure_logged_in(page, context) -> bool:
     await page.goto("https://www.threads.net/", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(2)
+    logger.info(f"[海巡] threads.net 目前 URL: {page.url}")
 
     if "login" in page.url.lower():
         username = os.environ.get("THREADS_USERNAME", "")
@@ -101,17 +102,19 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                 return []
 
             encoded = urllib.parse.quote(keyword)
-            await page.goto(
-                f"https://www.threads.net/search?q={encoded}&serp_type=default",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
+            search_url = f"https://www.threads.net/search?q={encoded}&serp_type=default"
+            logger.info(f"[海巡] 前往搜尋頁面: {search_url}")
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+            logger.info(f"[海巡] 目前 URL: {page.url}")
             await asyncio.sleep(3)
 
             try:
                 await page.wait_for_selector("article", timeout=15000)
             except Exception:
-                logger.warning(f"海巡搜尋「{keyword}」未找到任何貼文")
+                logger.warning(f"[海巡] 搜尋「{keyword}」未找到 article 元素，目前 URL: {page.url}")
+                # 嘗試截圖頁面 title 做診斷
+                title = await page.title()
+                logger.warning(f"[海巡] 頁面 title: {title}")
                 return []
 
             # 往下滾動以載入更多
@@ -121,6 +124,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
 
             my_username = os.environ.get("THREADS_USERNAME", "").lower()
             articles = await page.query_selector_all("article")
+            logger.info(f"[海巡] 找到 {len(articles)} 個 article 元素")
 
             for article in articles[:limit]:
                 try:
