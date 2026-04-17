@@ -1,3 +1,6 @@
+[variables]
+PLAYWRIGHT_BROWSERS_PATH = "/app/.playwright-browsers"
+
 [phases.setup]
 aptPkgs = [
   "libglib2.0-0", "libnss3", "libnspr4", "libatk1.0-0",
@@ -8,7 +11,7 @@ aptPkgs = [
 ]
 
 [phases.build]
-cmds = ["playwright install chromium"]
+cmds = ["PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers playwright install chromium"]
 
 [start]
 cmd = "uvicorn main:app --host 0.0.0.0 --port $PORT"
