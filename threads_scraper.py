@@ -204,6 +204,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
 
                     text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
+                    logger.info(f"[海巡] shortcode={shortcode} text_len={len(text)} username={username!r} text_preview={text[:60]!r}")
 
                     if not text or len(text) < 20:
                         continue
