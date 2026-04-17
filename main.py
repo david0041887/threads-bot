@@ -405,15 +405,26 @@ async def env_check():
 async def test_search(keyword: str = Query(default="保險")):
     if not PLAYWRIGHT_AVAILABLE:
         return {"error": "Playwright 不可用"}
+    import io, logging as _logging
+    buf = io.StringIO()
+    handler = _logging.StreamHandler(buf)
+    handler.setLevel(_logging.DEBUG)
+    for name in ("threads_scraper", "main"):
+        _logging.getLogger(name).addHandler(handler)
     try:
         results = await search_threads_by_keyword_async(keyword=keyword, limit=5)
+        logs = buf.getvalue()
         return {
             "keyword": keyword,
             "count": len(results),
             "results": [{"shortcode": p.shortcode, "username": p.username, "text": p.text[:80]} for p in results],
+            "logs": logs,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "logs": buf.getvalue()}
+    finally:
+        for name in ("threads_scraper", "main"):
+            _logging.getLogger(name).removeHandler(handler)
 
 
 @app.get("/admin/test-login")
