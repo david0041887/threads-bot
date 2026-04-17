@@ -125,8 +125,10 @@ def _ensure_chromium():
 async def lifespan(app: FastAPI):
     _ensure_chromium()
     scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), id="daily_draft", replace_existing=True)
-    scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-    scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
+    # poll_replies 暫停（待確認 UI 回覆正常後啟用）
+    # scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
+    # 海巡暫停（UI 回覆測試中）
+    # scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
     scheduler.start()
     logger.info("Scheduler 啟動")
@@ -387,21 +389,10 @@ async def manual_poll():
 
 @app.post("/admin/trigger-patrol")
 async def manual_patrol():
-    import io, logging as _logging
-    buf = io.StringIO()
-    handler = _logging.StreamHandler(buf)
-    handler.setLevel(_logging.INFO)
-    for name in ("threads_scraper", "main", "threads_client"):
-        _logging.getLogger(name).addHandler(handler)
-    try:
-        await proactive_patrol_job(force=True)
-        return {"status": "patrolled", "patrol_stats": daily_proactive_count, "logs": buf.getvalue()}
-    except Exception as e:
-        logger.error(f"手動海巡失敗: {e}", exc_info=True)
-        return {"status": "error", "detail": str(e), "logs": buf.getvalue()}
-    finally:
-        for name in ("threads_scraper", "main", "threads_client"):
-            _logging.getLogger(name).removeHandler(handler)
+    """非阻塞觸發海巡，結果透過 Telegram 通知。"""
+    import asyncio
+    asyncio.create_task(proactive_patrol_job(force=True))
+    return {"status": "started", "message": "海巡已在背景執行，結果將透過 Telegram 通知"}
 
 
 @app.get("/admin/patrol-stats")
