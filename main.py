@@ -423,7 +423,7 @@ async def test_login():
             context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
             page = await context.new_page()
 
-            await page.goto("https://www.threads.net/login", wait_until="domcontentloaded", timeout=30000)
+            await page.goto("https://www.threads.com/login", wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
             url_after_goto = page.url
             steps.append(f"login URL: {url_after_goto}")

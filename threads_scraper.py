@@ -46,7 +46,7 @@ class ScrapedPost:
 
 async def _ensure_logged_in(page, context) -> bool:
     # 直接進 /login，若已登入會被重導到首頁
-    await page.goto("https://www.threads.net/login", wait_until="domcontentloaded", timeout=30000)
+    await page.goto("https://www.threads.com/login", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(2)
     logger.info(f"[海巡] /login 目前 URL: {page.url}")
 
@@ -107,7 +107,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                 return []
 
             encoded = urllib.parse.quote(keyword)
-            search_url = f"https://www.threads.net/search?q={encoded}&serp_type=default"
+            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=default"
             logger.info(f"[海巡] 前往搜尋頁面: {search_url}")
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
             logger.info(f"[海巡] 目前 URL: {page.url}")
