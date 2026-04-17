@@ -66,9 +66,9 @@ async def _ensure_logged_in(page, context) -> bool:
                     pw["httpOnly"] = bool(c["httpOnly"])
                 if "secure" in c:
                     pw["secure"] = bool(c["secure"])
-                # 修正 sameSite 值
-                ss = c.get("sameSite", "Lax")
-                pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), ss)
+                # 修正 sameSite 值（可能為 None）
+                ss = c.get("sameSite") or "Lax"
+                pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), "Lax")
                 pw_cookies.append(pw)
             await context.add_cookies(pw_cookies)
             logger.info(f"[海巡] 已從環境變數載入 {len(pw_cookies)} 個 cookies")
@@ -147,44 +147,61 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
             logger.info(f"[海巡] 目前 URL: {page.url}")
             await asyncio.sleep(3)
 
+            # 等待貼文連結出現（Threads 可能已不用 article 標籤）
             try:
-                await page.wait_for_selector("article", timeout=15000)
+                await page.wait_for_selector('a[href*="/post/"]', timeout=15000)
             except Exception:
-                logger.warning(f"[海巡] 搜尋「{keyword}」未找到 article 元素，目前 URL: {page.url}")
-                # 嘗試截圖頁面 title 做診斷
                 title = await page.title()
-                logger.warning(f"[海巡] 頁面 title: {title}")
+                logger.warning(f"[海巡] 搜尋「{keyword}」無結果，title={title}, URL={page.url}")
                 return []
 
-            # 往下滾動以載入更多
-            for _ in range(2):
+            # 滾動載入更多
+            for _ in range(3):
                 await page.evaluate("window.scrollBy(0, window.innerHeight)")
                 await asyncio.sleep(1.5)
 
             my_username = os.environ.get("THREADS_USERNAME", "").lower()
-            articles = await page.query_selector_all("article")
-            logger.info(f"[海巡] 找到 {len(articles)} 個 article 元素")
 
-            for article in articles[:limit]:
+            # 取得所有貼文連結，從連結往上找貼文容器
+            post_links = await page.query_selector_all('a[href*="/post/"]')
+            logger.info(f"[海巡] 找到 {len(post_links)} 個貼文連結")
+
+            seen_shortcodes: set[str] = set()
+            for link_el in post_links[:limit * 3]:
                 try:
-                    link_el = await article.query_selector('a[href*="/post/"]')
-                    if not link_el:
-                        continue
                     href = await link_el.get_attribute("href") or ""
                     match = re.search(r"/post/([A-Za-z0-9_-]+)", href)
                     if not match:
                         continue
                     shortcode = match.group(1)
+                    if shortcode in seen_shortcodes:
+                        continue
+                    seen_shortcodes.add(shortcode)
 
-                    spans = await article.query_selector_all('span[dir="auto"]')
+                    # 往上找貼文容器（最多 8 層）
+                    container = link_el
+                    for _ in range(8):
+                        parent = await container.evaluate_handle("el => el.parentElement")
+                        if not parent:
+                            break
+                        container = parent.as_element() or container
+                        inner = await container.inner_text()
+                        if len(inner.strip()) > 30:
+                            break
+
+                    # 取文字
+                    spans = await container.query_selector_all('span[dir="auto"]')
                     text = " ".join(
                         t for el in spans
                         if len(t := (await el.inner_text()).strip()) > 10
                     )
+                    if not text:
+                        text = (await container.inner_text()).strip()
                     if not text or len(text) < 20:
                         continue
 
-                    user_el = await article.query_selector('a[href^="/@"]')
+                    # 取用戶名
+                    user_el = await container.query_selector('a[href^="/@"]')
                     username = ""
                     if user_el:
                         user_href = await user_el.get_attribute("href") or ""
@@ -194,6 +211,8 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                         continue
 
                     posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username))
+                    if len(posts) >= limit:
+                        break
 
                 except Exception as e:
                     logger.debug(f"解析貼文失敗: {e}")
