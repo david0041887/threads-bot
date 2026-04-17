@@ -195,7 +195,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                             if (!node) break;
                             const uLink = node.querySelector('a[href^="/@"]');
                             if (uLink) {
-                                username = (uLink.getAttribute('href') || '').replace(/^\\/@/, '');
+                                username = (uLink.getAttribute('href') || '').replace(/^\\/@/, '').split('/')[0];
                                 break;
                             }
                         }
@@ -204,8 +204,6 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
 
                     text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
-                    logger.info(f"[海巡] shortcode={shortcode} text_len={len(text)} username={username!r} text_preview={text[:60]!r}")
-
                     if not text or len(text) < 20:
                         continue
                     if username.lower() == my_username:
