@@ -178,39 +178,40 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                         continue
                     seen_shortcodes.add(shortcode)
 
-                    # 往上找貼文容器（最多 8 層）
-                    container = link_el
-                    for _ in range(8):
-                        parent = await container.evaluate_handle("el => el.parentElement")
-                        if not parent:
-                            break
-                        container = parent.as_element() or container
-                        inner = await container.inner_text()
-                        if len(inner.strip()) > 30:
-                            break
+                    # 用 JavaScript 往上遍歷找貼文文字和帳號
+                    result = await link_el.evaluate("""el => {
+                        let node = el;
+                        let text = '';
+                        let username = '';
+                        for (let i = 0; i < 15; i++) {
+                            node = node.parentElement;
+                            if (!node) break;
+                            const t = (node.innerText || '').trim();
+                            if (t.length > 50) { text = t.slice(0, 500); break; }
+                        }
+                        node = el;
+                        for (let i = 0; i < 15; i++) {
+                            node = node.parentElement;
+                            if (!node) break;
+                            const uLink = node.querySelector('a[href^="/@"]');
+                            if (uLink) {
+                                username = (uLink.getAttribute('href') || '').replace(/^\\/@/, '');
+                                break;
+                            }
+                        }
+                        return {text: text, username: username};
+                    }""")
 
-                    # 取文字
-                    spans = await container.query_selector_all('span[dir="auto"]')
-                    text = " ".join(
-                        t for el in spans
-                        if len(t := (await el.inner_text()).strip()) > 10
-                    )
-                    if not text:
-                        text = (await container.inner_text()).strip()
+                    text = (result.get("text") or "").strip()
+                    username = (result.get("username") or "").strip()
+
                     if not text or len(text) < 20:
                         continue
-
-                    # 取用戶名
-                    user_el = await container.query_selector('a[href^="/@"]')
-                    username = ""
-                    if user_el:
-                        user_href = await user_el.get_attribute("href") or ""
-                        username = user_href.lstrip("/@")
-
                     if username.lower() == my_username:
                         continue
 
                     posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username))
+                    logger.debug(f"[海巡] 擷取: @{username} shortcode={shortcode} text={text[:40]}")
                     if len(posts) >= limit:
                         break
 
