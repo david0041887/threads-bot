@@ -113,17 +113,33 @@ async def _ensure_logged_in(page, context) -> bool:
 
 
 def _extract_pk_map(json_text: str) -> dict[str, str]:
-    """從 API JSON 回應中提取 shortcode → pk (media_id) 對應表"""
+    """從 API JSON 回應中提取 shortcode → media_id 對應表。
+    支援 Threads/Instagram API 各種欄位命名：
+    - code / shortcode → pk / id
+    - URL 中含有 /post/shortcode 旁邊的 id 欄位
+    """
     pk_map: dict[str, str] = {}
     try:
-        # 找所有 "code":"SHORTCODE" 並在附近找 "pk":"ID"
-        for m in re.finditer(r'"code"\s*:\s*"([A-Za-z0-9_-]{6,})"', json_text):
+        window = 400  # 搜尋視窗大小
+        id_pattern = re.compile(r'"(?:pk|id)"\s*:\s*"?(\d{12,20})"?')
+        # 1. "code":"SHORTCODE" 或 "shortcode":"SHORTCODE"
+        for m in re.finditer(r'"(?:code|shortcode)"\s*:\s*"([A-Za-z0-9_-]{6,15})"', json_text):
             code = m.group(1)
-            # 在 code 前後 300 個字元內找 pk
-            start = max(0, m.start() - 300)
-            end = min(len(json_text), m.end() + 300)
+            start = max(0, m.start() - window)
+            end = min(len(json_text), m.end() + window)
             snippet = json_text[start:end]
-            pk_match = re.search(r'"pk"\s*:\s*"?(\d{12,20})"?', snippet)
+            pk_match = id_pattern.search(snippet)
+            if pk_match:
+                pk_map[code] = pk_match.group(1)
+        # 2. URL 內含 /post/SHORTCODE 旁邊的 id
+        for m in re.finditer(r'/post/([A-Za-z0-9_-]{6,15})', json_text):
+            code = m.group(1)
+            if code in pk_map:
+                continue
+            start = max(0, m.start() - window)
+            end = min(len(json_text), m.end() + window)
+            snippet = json_text[start:end]
+            pk_match = id_pattern.search(snippet)
             if pk_match:
                 pk_map[code] = pk_match.group(1)
     except Exception:
