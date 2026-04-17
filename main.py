@@ -103,8 +103,27 @@ def reset_daily_count():
         daily_proactive_count.update({"morning": 0, "noon": 0, "evening": 0, "date": today})
 
 
+def _ensure_chromium():
+    import subprocess, sys
+    browser_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/app/.playwright-browsers")
+    import glob as _glob
+    if not _glob.glob(f"{browser_path}/**/chrome-headless-shell", recursive=True):
+        logger.info(f"[Playwright] Chromium 未找到，正在安裝到 {browser_path} ...")
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            logger.info("[Playwright] Chromium 安裝完成")
+        else:
+            logger.error(f"[Playwright] 安裝失敗: {result.stderr[:500]}")
+    else:
+        logger.info(f"[Playwright] Chromium 已存在於 {browser_path}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _ensure_chromium()
     scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), id="daily_draft", replace_existing=True)
     scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
     scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
