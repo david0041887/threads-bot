@@ -71,6 +71,8 @@ class ThreadsClient:
         data["access_token"] = self.access_token
         url = f"{THREADS_API_BASE}/{path}"
         resp = self._http.post(url, data=data)
+        if not resp.is_success:
+            logger.error(f"API error {resp.status_code}: {resp.text[:500]}")
         resp.raise_for_status()
         return resp.json()
 
