@@ -21,7 +21,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 from threads_client import ThreadsClient
 from ai_generator import generate_post_drafts, generate_reply, generate_daily_topics, generate_proactive_reply
 from notifier import notify_drafts_for_approval, notify_error, notify_reply_for_approval, send_telegram
-from threads_scraper import search_threads_by_keyword_async
+try:
+    from threads_scraper import search_threads_by_keyword_async
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    PLAYWRIGHT_AVAILABLE = False
+    logger.warning("Playwright 未安裝，海巡功能停用")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -184,6 +189,9 @@ async def proactive_patrol_job(force: bool = False):
     logger.info(f"[海巡] 搜尋關鍵字：{keyword}，本批次：{batch} 則")
 
     # 用 Playwright 爬蟲搜尋他人公開貼文
+    if not PLAYWRIGHT_AVAILABLE:
+        logger.warning("[海巡] Playwright 不可用，跳過本次海巡")
+        return
     try:
         results = await search_threads_by_keyword_async(keyword=keyword, limit=20)
     except Exception as e:
