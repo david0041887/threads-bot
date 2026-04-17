@@ -11,10 +11,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+CONTROL_URL = "https://threads-bot-production-93cc.up.railway.app/control"
+
 
 def send_telegram(message: str) -> bool:
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "8763610718:AAEcUI4Bsd30nkTihF1fckR5AGJfg7xL-XQ")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "1011284165")
     if not bot_token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未設定")
         return False
@@ -43,10 +45,8 @@ def notify_drafts_for_approval(drafts: list[dict], job_id: str, channel: Optiona
         lines.append("─" * 20)
         lines.append(draft)
         lines.append("")
-    lines.append("💬 直接回此 TG 訊息：")
-    lines.append("  「1」「2」「3」→ 發對應草稿")
-    lines.append("  「跳過」→ 今日不發")
-    lines.append(f"  (或明確指定：選1 {job_id} / 跳過 {job_id})")
+    lines.append(f"✅ 在控制台填入 job_id 選擇發文")
+    lines.append(f"🔗 {CONTROL_URL}")
     message = "\n".join(lines)
     return send_telegram(message)
 
@@ -60,10 +60,8 @@ def notify_reply_for_approval(reply_job_id: str, commenter: str, comment_text: s
         f"─────────────\n"
         f"預計回覆：\n{reply_text}\n"
         f"─────────────\n"
-        f"💬 直接回此 TG 訊息：\n"
-        f"  「回覆」→ 送出此則回覆\n"
-        f"  「略過」→ 不回此留言\n"
-        f"  (或明確指定：回覆 {reply_job_id} / 略過 {reply_job_id})"
+        f"✅ 在控制台填入 reply_job_id 確認回覆\n"
+        f"🔗 {CONTROL_URL}"
     )
     return send_telegram(message)
 

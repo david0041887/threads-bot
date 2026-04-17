@@ -166,6 +166,8 @@ async def proactive_patrol_job():
     replied = 0
     try:
         results = client.search_posts(keyword=keyword, limit=20)
+        if not results:
+            results = client.get_keyword_feed(keyword=keyword, limit=20)
         random.shuffle(results)
 
         for post in results:
@@ -274,84 +276,33 @@ async def approve_draft(job_id: str, choice: str):
         client.close()
 
 
-def _latest_pending(jobs: dict) -> Optional[str]:
-    for jid, job in reversed(list(jobs.items())):
-        if job.get("status") == "pending":
-            return jid
-    return None
-
-
 @app.post("/webhook/telegram")
 async def telegram_message_handler(request: Request):
     payload = await request.json()
     text = payload.get("message", {}).get("text", "").strip()
     import re
-
-    m = re.match(r"^選\s*([123])\s+(\w+)$", text)
+    m = re.match(r"選\s*([123])\s+(\w+)", text)
     if m:
         result = await approve_draft(job_id=m.group(2), choice=m.group(1))
         if result.get("status") == "published":
             send_telegram(f"✅ 已發文！post_id: {result.get('post_id')}")
         return JSONResponse({"ok": True})
-
-    m = re.match(r"^(?:選\s*)?([123])$", text)
-    if m:
-        jid = _latest_pending(pending_jobs)
-        if not jid:
-            send_telegram("⚠️ 目前沒有待審核的草稿")
-            return JSONResponse({"ok": True})
-        result = await approve_draft(job_id=jid, choice=m.group(1))
-        if result.get("status") == "published":
-            send_telegram(f"✅ 已發文！post_id: {result.get('post_id')}")
-        return JSONResponse({"ok": True})
-
-    m = re.match(r"^跳過\s+(\w+)$", text)
-    if m:
-        await approve_draft(job_id=m.group(1), choice="skip")
+    m2 = re.match(r"跳過\s+(\w+)", text)
+    if m2:
+        await approve_draft(job_id=m2.group(1), choice="skip")
         send_telegram("⏭ 今日發文已跳過")
         return JSONResponse({"ok": True})
-
-    if text == "跳過":
-        jid = _latest_pending(pending_jobs)
-        if not jid:
-            send_telegram("⚠️ 目前沒有待審核的草稿")
-            return JSONResponse({"ok": True})
-        await approve_draft(job_id=jid, choice="skip")
-        send_telegram("⏭ 今日發文已跳過")
-        return JSONResponse({"ok": True})
-
-    m = re.match(r"^回覆\s+(\w+)$", text)
-    if m:
-        result = await approve_reply(reply_job_id=m.group(1), action="send")
+    m3 = re.match(r"回覆\s+(\w+)", text)
+    if m3:
+        result = await approve_reply(reply_job_id=m3.group(1), action="send")
         if result.get("status") == "replied":
             send_telegram("✅ 回覆已發出")
         return JSONResponse({"ok": True})
-
-    if text == "回覆":
-        rjid = _latest_pending(pending_replies)
-        if not rjid:
-            send_telegram("⚠️ 目前沒有待審核的留言")
-            return JSONResponse({"ok": True})
-        result = await approve_reply(reply_job_id=rjid, action="send")
-        if result.get("status") == "replied":
-            send_telegram("✅ 回覆已發出")
-        return JSONResponse({"ok": True})
-
-    m = re.match(r"^略過\s+(\w+)$", text)
-    if m:
-        await approve_reply(reply_job_id=m.group(1), action="skip")
+    m4 = re.match(r"略過\s+(\w+)", text)
+    if m4:
+        await approve_reply(reply_job_id=m4.group(1), action="skip")
         send_telegram("⏭ 已略過此則留言")
         return JSONResponse({"ok": True})
-
-    if text == "略過":
-        rjid = _latest_pending(pending_replies)
-        if not rjid:
-            send_telegram("⚠️ 目前沒有待審核的留言")
-            return JSONResponse({"ok": True})
-        await approve_reply(reply_job_id=rjid, action="skip")
-        send_telegram("⏭ 已略過此則留言")
-        return JSONResponse({"ok": True})
-
     return JSONResponse({"ok": True})
 
 

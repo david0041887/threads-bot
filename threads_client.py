@@ -224,12 +224,55 @@ class ThreadsClient:
 
 
     def search_posts(self, keyword: str, limit: int = 20) -> list:
-        """搜尋含特定關鍵字的公開貼文"""
+        """
+        搜尋含特定關鍵字的公開貼文。
+        Threads API 使用 GET /{user-id}/threads?type=keyword&q={keyword}
+        需要 threads_basic 權限。
+        """
         fields = "id,text,timestamp,username,permalink"
         try:
             data = self._get(
-                "threads/search",
-                {"q": keyword, "fields": fields, "limit": limit},
+                f"{self.user_id}/threads",
+                {"type": "keyword", "q": keyword, "fields": fields, "limit": limit},
+            )
+            posts = []
+            for item in data.get("data", []):
+                text = item.get("text", "")
+                if text and item.get("username") != self._get_my_username():
+                    posts.append(ThreadsPost(
+                        id=item["id"],
+                        text=text,
+                        timestamp=item.get("timestamp", ""),
+                        permalink=item.get("permalink", ""),
+                    ))
+            return posts
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                logger.warning(f"關鍵字搜尋不支援此帳號或需要額外權限: {e}")
+            else:
+                logger.warning(f"搜尋失敗 ({e.response.status_code}): {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"搜尋失敗: {e}")
+            return []
+
+    def _get_my_username(self) -> str:
+        try:
+            data = self._get(self.user_id, {"fields": "username"})
+            return data.get("username", "")
+        except Exception:
+            return ""
+
+    def get_keyword_feed(self, keyword: str, limit: int = 20) -> list:
+        """
+        備用：取得含關鍵字的 hashtag 或探索貼文。
+        若 keyword search API 不可用時使用。
+        """
+        fields = "id,text,timestamp,username,permalink"
+        try:
+            data = self._get(
+                "search",
+                {"q": keyword, "type": "threads", "fields": fields, "limit": limit},
             )
             posts = []
             for item in data.get("data", []):
@@ -242,7 +285,7 @@ class ThreadsClient:
                     ))
             return posts
         except Exception as e:
-            logger.warning(f"搜尋失敗: {e}")
+            logger.warning(f"備用搜尋失敗: {e}")
             return []
 
     def close(self):
