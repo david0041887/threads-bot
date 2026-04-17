@@ -395,6 +395,12 @@ async def patrol_stats():
     return {"daily_count": daily_proactive_count}
 
 
+@app.get("/admin/env-check")
+async def env_check():
+    keys = [k for k in os.environ if "THREAD" in k.upper() or "TELEGRAM" in k.upper() or "ANTHROPIC" in k.upper() or "PLAYWRIGHT" in k.upper()]
+    return {"keys_found": sorted(keys)}
+
+
 @app.get("/admin/test-search")
 async def test_search(keyword: str = Query(default="保險")):
     if not PLAYWRIGHT_AVAILABLE:
