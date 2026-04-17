@@ -254,7 +254,10 @@ async def proactive_patrol_job(force: bool = False):
                 continue
 
             try:
-                new_reply_id = client.reply_to_comment(reply_id=post.id, text=reply_text)
+                post_url = f"https://www.threads.com/@{post.username}/post/{post.shortcode}"
+                actual_id = client.get_post_id_from_url(post_url) or post.id
+                logger.info(f"[海巡] oEmbed id={actual_id} (shortcode={post.shortcode}, fallback={post.id})")
+                new_reply_id = client.reply_to_comment(reply_id=actual_id, text=reply_text)
                 replied += 1
                 daily_proactive_count[session] += 1
                 logger.info(f"[海巡] 已回覆 @{post.username} (shortcode={post.shortcode})")
@@ -387,7 +390,7 @@ async def manual_patrol():
     buf = io.StringIO()
     handler = _logging.StreamHandler(buf)
     handler.setLevel(_logging.INFO)
-    for name in ("threads_scraper", "main"):
+    for name in ("threads_scraper", "main", "threads_client"):
         _logging.getLogger(name).addHandler(handler)
     try:
         await proactive_patrol_job(force=True)
@@ -396,7 +399,7 @@ async def manual_patrol():
         logger.error(f"手動海巡失敗: {e}", exc_info=True)
         return {"status": "error", "detail": str(e), "logs": buf.getvalue()}
     finally:
-        for name in ("threads_scraper", "main"):
+        for name in ("threads_scraper", "main", "threads_client"):
             _logging.getLogger(name).removeHandler(handler)
 
 
