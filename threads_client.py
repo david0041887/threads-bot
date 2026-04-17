@@ -242,6 +242,20 @@ class ThreadsClient:
 
 
 
+    def get_post_id_from_url(self, post_url: str) -> str:
+        """用 oEmbed API 取得公開貼文的真實 media ID"""
+        try:
+            resp = self._http.get(
+                f"{THREADS_API_BASE}/oembed",
+                params={"url": post_url, "access_token": self.access_token},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("media_id", "")
+        except Exception as e:
+            logger.debug(f"oEmbed 查詢失敗 {post_url}: {e}")
+            return ""
+
     def search_posts(self, keyword: str, limit: int = 20) -> list:
         """
         搜尋含特定關鍵字的公開貼文。
