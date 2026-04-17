@@ -45,36 +45,54 @@ class ScrapedPost:
 
 
 async def _ensure_logged_in(page, context) -> bool:
-    # 直接進 /login，若已登入會被重導到首頁
-    await page.goto("https://www.threads.com/login", wait_until="domcontentloaded", timeout=30000)
+    # 優先使用 THREADS_COOKIES 環境變數（從真實瀏覽器匯出）
+    cookies_env = os.environ.get("THREADS_COOKIES", "")
+    if cookies_env:
+        try:
+            cookies = json.loads(cookies_env)
+            # Playwright 需要 cookies 含有 domain 欄位
+            for c in cookies:
+                if "domain" not in c:
+                    c["domain"] = ".threads.com"
+            await context.add_cookies(cookies)
+            logger.info(f"[海巡] 已從環境變數載入 {len(cookies)} 個 cookies")
+        except Exception as e:
+            logger.warning(f"[海巡] THREADS_COOKIES 解析失敗: {e}")
+
+    # 前往首頁確認登入狀態
+    await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(2)
-    logger.info(f"[海巡] /login 目前 URL: {page.url}")
+    current_url = page.url
+    logger.info(f"[海巡] threads.com 目前 URL: {current_url}")
 
-    # 若被重導離開 login 頁面，表示 cookies 有效，已登入
-    if "login" not in page.url.lower():
-        logger.info("[海巡] cookies 有效，已登入")
-        return True
+    if "login" in current_url.lower() or "challenge" in current_url.lower():
+        logger.warning(f"[海巡] 未登入（URL: {current_url}），嘗試帳密登入")
+        username = os.environ.get("THREADS_USERNAME", "")
+        password = os.environ.get("THREADS_PASSWORD", "")
+        if not username or not password:
+            logger.error("[海巡] THREADS_USERNAME / THREADS_PASSWORD 未設定")
+            return False
+        try:
+            await page.goto("https://www.threads.com/login", wait_until="domcontentloaded", timeout=20000)
+            await page.wait_for_selector('input[autocomplete="username"]', timeout=15000)
+            await page.fill('input[autocomplete="username"]', username)
+            await page.fill('input[type="password"]', password)
+            await page.press('input[type="password"]', "Enter")
+            await asyncio.sleep(5)
+            final_url = page.url
+            logger.info(f"[海巡] 登入後 URL: {final_url}")
+            if "challenge" in final_url or "login" in final_url:
+                logger.error("[海巡] 登入被 Instagram 安全驗證擋住，需手動提供 THREADS_COOKIES")
+                return False
+            Path(COOKIES_FILE).write_text(json.dumps(await context.cookies()))
+            logger.info("[海巡] 登入成功")
+            return True
+        except Exception as e:
+            logger.error(f"[海巡] 登入失敗: {e}")
+            return False
 
-    # 需要重新登入
-    username = os.environ.get("THREADS_USERNAME", "")
-    password = os.environ.get("THREADS_PASSWORD", "")
-    if not username or not password:
-        logger.error("[海巡] THREADS_USERNAME / THREADS_PASSWORD 未設定")
-        return False
-
-    logger.info(f"[海巡] 嘗試登入帳號: {username}")
-    try:
-        await page.wait_for_selector('input[autocomplete="username"]', timeout=15000)
-        await page.fill('input[autocomplete="username"]', username)
-        await page.fill('input[type="password"]', password)
-        await page.press('input[type="password"]', "Enter")
-        await page.wait_for_url(re.compile(r"threads\.net(?!/login)"), timeout=30000)
-        Path(COOKIES_FILE).write_text(json.dumps(await context.cookies()))
-        logger.info("[海巡] 登入成功，已儲存 cookies")
-        return True
-    except Exception as e:
-        logger.error(f"[海巡] 登入失敗: {e}")
-        return False
+    logger.info("[海巡] 已登入")
+    return True
 
 
 async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list[ScrapedPost]:
