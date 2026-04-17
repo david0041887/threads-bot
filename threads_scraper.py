@@ -13,6 +13,9 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+# Ensure Playwright finds Chromium in the app directory (Railway build artifact)
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/app/.playwright-browsers")
+
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
