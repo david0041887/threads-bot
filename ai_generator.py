@@ -1,6 +1,7 @@
 """
 ai_generator.py
 Claude AI 內容生成 — 發文草稿 & 留言回覆 & 自動主題產生
+所有輸出均經過保險法規 + Meta 社群規範合規審查。
 """
 
 import os
@@ -39,6 +40,24 @@ ACCOUNT_PERSONA = os.getenv("ACCOUNT_PERSONA", """
 """).strip()
 
 
+_COMPLIANCE_RULES = """
+【台灣保險業務員管理規範（保險法第 163 條相關）】
+1. 不得以不實、誇大或易使人誤解的方式描述保險商品
+2. 不得保證保險契約收益，不得以過去績效暗示未來報酬
+3. 不得提及已停售商品：失能險、副本實支實付
+4. 只能使用「重大傷病險」，不得使用「重大疾病險」
+5. 不得點名比較特定保險公司或商品
+6. 不得以贈品或其他利益招攬保險
+7. 不得以「保證」「絕對」「一定」等字眼描述保障或收益
+
+【Meta 社群規範】
+1. 不得發布誤導性、虛假或煽動性內容
+2. 不得騷擾、歧視或威脅他人
+3. 不得以協調性不真實方式操控資訊
+4. 商業行銷需符合 Meta 廣告政策
+"""
+
+
 def _call_claude(system: str, user: str, max_tokens: int = 1000) -> str:
     headers = {
         "x-api-key": os.environ["ANTHROPIC_API_KEY"],
@@ -54,6 +73,46 @@ def _call_claude(system: str, user: str, max_tokens: int = 1000) -> str:
     resp = httpx.post(ANTHROPIC_API, headers=headers, json=body, timeout=60)
     resp.raise_for_status()
     return resp.json()["content"][0]["text"].strip()
+
+
+def check_compliance(text: str) -> dict:
+    """
+    合規審查：確認內容符合保險法規及 Meta 社群規範。
+    回傳 {"compliant": bool, "issues": list[str], "fixed_text": str}
+    若無違規，fixed_text 與原文相同。
+    """
+    system = "你是台灣保險法規與 Meta 社群規範的合規審查員。只輸出 JSON，不加任何說明或 markdown。"
+    user = f"""請審查以下內容，確認是否違反規定，並輸出修正版本。
+
+合規規則：
+{_COMPLIANCE_RULES}
+
+待審查內容：
+{text}
+
+輸出 JSON（不加 ```）：
+{{
+  "compliant": true 或 false,
+  "issues": ["違規事項（若無則空陣列）"],
+  "fixed_text": "修正後內容（若無違規則與原文完全相同）"
+}}"""
+
+    try:
+        raw = _call_claude(system, user, max_tokens=1200)
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
+        if result.get("issues"):
+            logger.warning(f"合規問題：{result['issues']}")
+        return result
+    except Exception as e:
+        logger.error(f"合規審查失敗，略過審查: {e}")
+        return {"compliant": True, "issues": [], "fixed_text": text}
+
+
+def _apply_compliance(text: str) -> str:
+    """審查並回傳合規後的文字。若審查失敗，回傳原文。"""
+    result = check_compliance(text)
+    return result.get("fixed_text") or text
 
 
 def generate_daily_topics() -> list[dict]:
@@ -115,8 +174,13 @@ def generate_post_drafts(source_articles: list[dict], count: int = 3) -> list[di
 
     raw = _call_claude(system, user, max_tokens=2000)
     clean = raw.replace("```json", "").replace("```", "").strip()
-    drafts = json.loads(clean)
-    return drafts[:count]
+    drafts = json.loads(clean)[:count]
+
+    # 合規審查並修正每篇草稿
+    for d in drafts:
+        d["draft"] = _apply_compliance(d["draft"])
+
+    return drafts
 
 
 def generate_reply(
@@ -155,7 +219,8 @@ def generate_reply(
 
 請回覆這則留言："""
 
-    return _call_claude(system, context, max_tokens=300)
+    reply = _call_claude(system, context, max_tokens=300)
+    return _apply_compliance(reply)
 
 
 def generate_proactive_reply(post_text: str, keyword: str) -> str:
@@ -187,9 +252,9 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 
     try:
         result = _call_claude(system, user, max_tokens=300)
-        if result.strip() in ["", "空字串", "不適合回覆"]:
+        if result.strip() in ("", "空字串", "不適合回覆"):
             return ""
-        return result.strip()
+        return _apply_compliance(result.strip())
     except Exception as e:
         logger.error(f"主動回覆生成失敗: {e}")
         return ""

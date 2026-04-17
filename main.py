@@ -19,6 +19,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from threads_client import ThreadsClient
 from ai_generator import generate_post_drafts, generate_reply, generate_daily_topics, generate_proactive_reply
 from notifier import notify_drafts_for_approval, notify_error, notify_reply_for_approval, send_telegram
+from threads_scraper import search_threads_by_keyword_async
 
 logging.basicConfig(
     level=logging.INFO,
@@ -162,23 +163,30 @@ async def proactive_patrol_job():
     keyword = random.choice(SEARCH_KEYWORDS)
     logger.info(f"[海巡] 搜尋關鍵字：{keyword}，本批次：{batch} 則")
 
+    # 用 Playwright 爬蟲搜尋他人公開貼文
+    try:
+        results = await search_threads_by_keyword_async(keyword=keyword, limit=20)
+    except Exception as e:
+        logger.error(f"[海巡] 爬蟲搜尋失敗: {e}")
+        return
+
+    if not results:
+        logger.info(f"[海巡] 關鍵字「{keyword}」無搜尋結果")
+        return
+
+    random.shuffle(results)
     client = get_client()
     replied = 0
     try:
-        results = client.search_posts(keyword=keyword, limit=20)
-        if not results:
-            results = client.get_keyword_feed(keyword=keyword, limit=20)
-        random.shuffle(results)
-
         for post in results:
             if replied >= batch:
                 break
-            if post.id in processed_proactive_ids:
+            if post.shortcode in processed_proactive_ids:
                 continue
             if not post.text or len(post.text) < 20:
                 continue
 
-            processed_proactive_ids.add(post.id)
+            processed_proactive_ids.add(post.shortcode)
 
             reply_text = generate_proactive_reply(
                 post_text=post.text,
@@ -188,26 +196,24 @@ async def proactive_patrol_job():
             if not reply_text:
                 continue
 
-            # 直接發出，不需要審核
             try:
                 new_reply_id = client.reply_to_comment(reply_id=post.id, text=reply_text)
                 replied += 1
                 daily_proactive_count[session] += 1
-                logger.info(f"[海巡] 已回覆貼文 {post.id}，本日 {session} 已用 {daily_proactive_count[session]}/{quota}")
+                logger.info(f"[海巡] 已回覆 @{post.username} (shortcode={post.shortcode})")
 
-                # 推播通知
                 send_telegram(
                     f"🔍 海巡回覆通知\n"
                     f"關鍵字：{keyword}\n"
-                    f"原文：{post.text[:80]}...\n"
+                    f"@{post.username}：{post.text[:80]}...\n"
                     f"─────────────\n"
                     f"回覆內容：\n{reply_text}"
                 )
             except Exception as e:
-                logger.error(f"[海巡] 回覆失敗: {e}")
+                logger.error(f"[海巡] 回覆失敗 (shortcode={post.shortcode}): {e}")
 
     except Exception as e:
-        logger.error(f"[海巡] 搜尋失敗: {e}")
+        logger.error(f"[海巡] 執行失敗: {e}")
     finally:
         client.close()
 

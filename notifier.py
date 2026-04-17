@@ -15,8 +15,8 @@ CONTROL_URL = "https://threads-bot-production-93cc.up.railway.app/control"
 
 
 def send_telegram(message: str) -> bool:
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "8763610718:AAEcUI4Bsd30nkTihF1fckR5AGJfg7xL-XQ")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "1011284165")
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not bot_token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未設定")
         return False
