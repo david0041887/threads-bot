@@ -306,3 +306,263 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
             return []
         finally:
             await browser.close()
+
+
+async def _ui_reply_to_post(page, post_url: str, reply_text: str) -> bool:
+    """
+    使用 Playwright 瀏覽器 UI 在 Threads 串文底下回覆。
+    回傳 True 表示成功送出。
+    """
+    try:
+        logger.info(f"[海巡-UI] 前往貼文: {post_url}")
+        await page.goto(post_url, wait_until="domcontentloaded", timeout=25000)
+        await asyncio.sleep(3)
+
+        # 確認頁面已載入（找到貼文容器）
+        try:
+            await page.wait_for_selector('a[href*="/post/"]', timeout=10000)
+        except Exception:
+            logger.warning(f"[海巡-UI] 頁面未正確載入: {post_url}")
+            return False
+
+        # 找回覆按鈕：Threads UI 的 svg aria-label 或 data-testid
+        reply_btn = None
+        for sel in [
+            'svg[aria-label="Reply"]',
+            'svg[aria-label="回覆"]',
+            '[data-testid="reply-button"]',
+            'div[role="button"] svg[aria-label*="eply"]',
+        ]:
+            reply_btn = await page.query_selector(sel)
+            if reply_btn:
+                break
+
+        if not reply_btn:
+            # 嘗試找第一個 article 內的 svg 按鈕群組的第一個 button
+            reply_btn = await page.query_selector('article div[role="button"]:first-of-type')
+
+        if not reply_btn:
+            logger.warning("[海巡-UI] 找不到回覆按鈕")
+            return False
+
+        await reply_btn.click()
+        await asyncio.sleep(1.5)
+
+        # 找回覆輸入框（contenteditable 或 textarea）
+        input_box = None
+        for sel in [
+            '[role="textbox"][aria-label*="eply"]',
+            '[role="textbox"][aria-label*="覆"]',
+            '[contenteditable="true"]',
+            'textarea',
+        ]:
+            input_box = await page.query_selector(sel)
+            if input_box:
+                break
+
+        if not input_box:
+            logger.warning("[海巡-UI] 找不到輸入框")
+            return False
+
+        await input_box.click()
+        await asyncio.sleep(0.5)
+        await input_box.type(reply_text, delay=30)
+        await asyncio.sleep(0.5)
+
+        # 找送出按鈕
+        post_btn = None
+        for sel in [
+            'div[role="button"][aria-label*="Post"]',
+            'div[role="button"][aria-label*="送出"]',
+            'button[type="submit"]',
+            # 備用：找含「Post」文字的按鈕
+        ]:
+            post_btn = await page.query_selector(sel)
+            if post_btn:
+                break
+
+        if not post_btn:
+            # 備用：用 Ctrl+Enter 送出
+            logger.info("[海巡-UI] 找不到送出鍵，改用 Ctrl+Enter")
+            await input_box.press("Control+Enter")
+        else:
+            await post_btn.click()
+
+        await asyncio.sleep(3)
+        logger.info(f"[海巡-UI] 回覆送出成功: {post_url}")
+        return True
+
+    except Exception as e:
+        logger.error(f"[海巡-UI] 回覆失敗: {e}")
+        return False
+
+
+async def search_and_reply_async(
+    keyword: str,
+    reply_tasks: list[dict],  # [{"shortcode": ..., "username": ..., "text": ...}]
+) -> dict:
+    """
+    在同一個登入瀏覽器 session 中：先搜尋關鍵字貼文，再對指定貼文用 UI 回覆。
+    reply_tasks: 要回覆的貼文清單，每筆含 shortcode, username, reply_text
+    回傳 {"posts": [...], "replied": [shortcode, ...], "failed": [shortcode, ...]}
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+        )
+
+        # 載入 cookies
+        cookies_env = os.environ.get("THREADS_COOKIES", "")
+        if cookies_env:
+            try:
+                raw = json.loads(cookies_env)
+                pw_cookies = []
+                for c in raw:
+                    pw = {
+                        "name": c["name"],
+                        "value": c["value"],
+                        "domain": c.get("domain", ".threads.com"),
+                        "path": c.get("path", "/"),
+                    }
+                    exp = c.get("expirationDate") or c.get("expires")
+                    if exp and exp > 0:
+                        pw["expires"] = int(exp)
+                    if "httpOnly" in c:
+                        pw["httpOnly"] = bool(c["httpOnly"])
+                    if "secure" in c:
+                        pw["secure"] = bool(c["secure"])
+                    ss = c.get("sameSite") or "Lax"
+                    pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), "Lax")
+                    pw_cookies.append(pw)
+                await context.add_cookies(pw_cookies)
+            except Exception as e:
+                logger.warning(f"[海巡] cookies 載入失敗: {e}")
+
+        page = await context.new_page()
+        replied = []
+        failed = []
+        posts = []
+
+        try:
+            # 確認登入
+            await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(2)
+            if "login" in page.url.lower():
+                logger.error("[海巡] 未登入，無法執行")
+                return {"posts": [], "replied": [], "failed": [t["shortcode"] for t in reply_tasks]}
+
+            # 搜尋
+            api_pk_map: dict[str, str] = {}
+
+            async def _capture_pk(response):
+                try:
+                    ct = response.headers.get("content-type", "")
+                    if "json" not in ct and "javascript" not in ct:
+                        return
+                    body = await response.text()
+                    has_id = '"pk"' in body or ('"id"' in body and len(body) > 500)
+                    has_code = '"code"' in body or '"shortcode"' in body or '/post/' in body
+                    if has_id and has_code:
+                        found = _extract_pk_map(body)
+                        if found:
+                            api_pk_map.update(found)
+                except Exception:
+                    pass
+
+            page.on("response", _capture_pk)
+
+            encoded = urllib.parse.quote(keyword)
+            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=default"
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(3)
+
+            try:
+                await page.wait_for_selector('a[href*="/post/"]', timeout=12000)
+                for _ in range(3):
+                    await page.evaluate("window.scrollBy(0, window.innerHeight)")
+                    await asyncio.sleep(1.5)
+            except Exception:
+                pass
+
+            logger.info(f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk")
+
+            # 搜集貼文
+            my_username = os.environ.get("THREADS_USERNAME", "").lower()
+            post_links = await page.query_selector_all('a[href*="/post/"]')
+            seen: set[str] = set()
+            for link_el in post_links[:60]:
+                try:
+                    href = await link_el.get_attribute("href") or ""
+                    m = re.search(r"/post/([A-Za-z0-9_-]+)", href)
+                    if not m:
+                        continue
+                    sc = m.group(1)
+                    if sc in seen:
+                        continue
+                    seen.add(sc)
+                    result = await link_el.evaluate("""el => {
+                        let node = el, text = '', username = '', mediaId = '';
+                        for (let i = 0; i < 15; i++) {
+                            node = node.parentElement; if (!node) break;
+                            const t = (node.innerText||'').trim();
+                            const did = node.getAttribute('data-id')||node.getAttribute('data-post-id')||node.getAttribute('data-media-id');
+                            if (did && /^\\d{10,}$/.test(did)) mediaId = did;
+                            if (!text && t.length > 50) text = t.slice(0,500);
+                        }
+                        node = el;
+                        for (let i = 0; i < 15; i++) {
+                            node = node.parentElement; if (!node) break;
+                            const uLink = node.querySelector('a[href^="/@"]');
+                            if (uLink) { username=(uLink.getAttribute('href')||'').replace(/^\\/@/,'').split('/')[0]; break; }
+                        }
+                        return {text,username,mediaId};
+                    }""")
+                    raw_text = (result.get("text") or "").strip()
+                    username = (result.get("username") or "").strip()
+                    media_id = api_pk_map.get(sc) or (result.get("mediaId") or "").strip() or _shortcode_to_id(sc)
+                    lines = raw_text.splitlines()
+                    clean = []
+                    skip = True
+                    for line in lines:
+                        s = line.strip()
+                        if skip and (not s or len(s) < 15 or re.match(r"^\d+[hdw]$|^@?\w{1,20}$", s)):
+                            continue
+                        skip = False
+                        clean.append(s)
+                    text = "\n".join(clean).strip() or raw_text
+                    if not text or len(text) < 20 or username.lower() == my_username:
+                        continue
+                    posts.append(ScrapedPost(shortcode=sc, text=text, username=username, media_id=media_id))
+                except Exception:
+                    pass
+
+            logger.info(f"[海巡] 找到 {len(posts)} 篇貼文")
+
+            # 對指定貼文做 UI 回覆
+            for task in reply_tasks:
+                sc = task["shortcode"]
+                username = task["username"]
+                reply_text = task["reply_text"]
+                post_url = f"https://www.threads.com/@{username}/post/{sc}"
+                ok = await _ui_reply_to_post(page, post_url, reply_text)
+                if ok:
+                    replied.append(sc)
+                else:
+                    failed.append(sc)
+                await asyncio.sleep(2)
+
+        except Exception as e:
+            logger.error(f"[海巡] search_and_reply 失敗: {e}")
+        finally:
+            await browser.close()
+
+        return {"posts": posts, "replied": replied, "failed": failed}

@@ -22,7 +22,7 @@ from threads_client import ThreadsClient
 from ai_generator import generate_post_drafts, generate_reply, generate_daily_topics, generate_proactive_reply
 from notifier import notify_drafts_for_approval, notify_error, notify_reply_for_approval, send_telegram
 try:
-    from threads_scraper import search_threads_by_keyword_async
+    from threads_scraper import search_threads_by_keyword_async, search_and_reply_async
     PLAYWRIGHT_AVAILABLE = True
 except Exception:
     PLAYWRIGHT_AVAILABLE = False
@@ -126,8 +126,7 @@ async def lifespan(app: FastAPI):
     _ensure_chromium()
     scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), id="daily_draft", replace_existing=True)
     scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-    # 海巡暫停：Threads Graph API 無法取得他人貼文的有效 reply_to_id，待解決後啟用
-    # scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
+    scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
     scheduler.start()
     logger.info("Scheduler 啟動")
@@ -198,13 +197,13 @@ async def poll_replies_job():
 
 
 async def proactive_patrol_job(force: bool = False):
-    """每 15 分鐘執行一次，在對應時段主動回覆保險相關貼文。force=True 可跳過時段限制。"""
+    """每 15 分鐘執行一次，用瀏覽器 UI 在串文底下直接回覆。force=True 可跳過時段限制。"""
     reset_daily_count()
     session = get_current_session()
     if not session:
         if not force:
             return
-        session = "morning"  # 強制執行時使用 morning 配額
+        session = "morning"
 
     quota = PATROL_SCHEDULE[session]["count"]
     used = daily_proactive_count[session]
@@ -212,15 +211,15 @@ async def proactive_patrol_job(force: bool = False):
         logger.info(f"[海巡] {session} 時段配額已用完 ({used}/{quota})")
         return
 
-    # 每次最多回覆 2 則，避免短時間大量操作
     batch = min(2, quota - used)
     keyword = random.choice(SEARCH_KEYWORDS)
     logger.info(f"[海巡] 搜尋關鍵字：{keyword}，本批次：{batch} 則")
 
-    # 用 Playwright 爬蟲搜尋他人公開貼文
     if not PLAYWRIGHT_AVAILABLE:
         logger.warning("[海巡] Playwright 不可用，跳過本次海巡")
         return
+
+    # Phase 1：搜尋貼文，篩選出要回覆的清單
     try:
         results = await search_threads_by_keyword_async(keyword=keyword, limit=20)
     except Exception as e:
@@ -232,51 +231,50 @@ async def proactive_patrol_job(force: bool = False):
         return
 
     random.shuffle(results)
-    client = get_client()
-    replied = 0
+
+    reply_tasks = []
+    for post in results:
+        if len(reply_tasks) >= batch:
+            break
+        if post.shortcode in processed_proactive_ids:
+            continue
+        if not post.text or len(post.text) < 20:
+            continue
+        reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
+        logger.info(f"[海巡] @{post.username} reply_len={len(reply_text)} preview={reply_text[:40]!r}")
+        if not reply_text:
+            continue
+        processed_proactive_ids.add(post.shortcode)
+        reply_tasks.append({
+            "shortcode": post.shortcode,
+            "username": post.username,
+            "text": post.text,
+            "reply_text": reply_text,
+        })
+
+    if not reply_tasks:
+        logger.info("[海巡] 無合適貼文可回覆")
+        return
+
+    # Phase 2：用同一瀏覽器 session 做 UI 回覆
     try:
-        for post in results:
-            if replied >= batch:
-                break
-            if post.shortcode in processed_proactive_ids:
-                continue
-            if not post.text or len(post.text) < 20:
-                continue
-
-            processed_proactive_ids.add(post.shortcode)
-
-            reply_text = generate_proactive_reply(
-                post_text=post.text,
-                keyword=keyword,
+        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks)
+        for sc in result.get("replied", []):
+            daily_proactive_count[session] += 1
+            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
+            logger.info(f"[海巡] UI 回覆成功 @{task.get('username')} shortcode={sc}")
+            send_telegram(
+                f"🔍 海巡回覆通知\n"
+                f"關鍵字：{keyword}\n"
+                f"@{task.get('username')}：{task.get('text','')[:80]}...\n"
+                f"─────────────\n"
+                f"回覆內容：\n{task.get('reply_text','')}"
             )
-            logger.info(f"[海巡] @{post.username} reply_text_len={len(reply_text)} preview={reply_text[:40]!r}")
-
-            if not reply_text:
-                continue
-
-            try:
-                # Threads Graph API 無法透過爬取方式取得他人貼文的 Graph API ID，
-                # 改為發布提及對方的獨立貼文（@mention），效果等同於在對話中補充。
-                mention_text = f"@{post.username} {reply_text}"
-                new_post_id = client.create_post(text=mention_text)
-                replied += 1
-                daily_proactive_count[session] += 1
-                logger.info(f"[海巡] 已發布提及貼文 @{post.username} post_id={new_post_id}")
-
-                send_telegram(
-                    f"🔍 海巡提及通知\n"
-                    f"關鍵字：{keyword}\n"
-                    f"@{post.username}：{post.text[:80]}...\n"
-                    f"─────────────\n"
-                    f"發文內容：\n{mention_text}"
-                )
-            except Exception as e:
-                logger.error(f"[海巡] 發文失敗 (shortcode={post.shortcode}): {e}")
-
+        for sc in result.get("failed", []):
+            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
+            logger.warning(f"[海巡] UI 回覆失敗 @{task.get('username')} shortcode={sc}")
     except Exception as e:
-        logger.error(f"[海巡] 執行失敗: {e}")
-    finally:
-        client.close()
+        logger.error(f"[海巡] search_and_reply 失敗: {e}")
 
 
 async def refresh_token_job():
