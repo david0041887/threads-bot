@@ -252,8 +252,10 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 
     try:
         result = _call_claude(system, user, max_tokens=300)
-        if result.strip() in ("", "空字串", "不適合回覆"):
+        cleaned = result.strip().strip('"').strip("'").strip()
+        if not cleaned or cleaned in ("空字串", "不適合回覆") or len(cleaned) < 5:
             return ""
+        result = cleaned
         return _apply_compliance(result.strip())
     except Exception as e:
         logger.error(f"主動回覆生成失敗: {e}")

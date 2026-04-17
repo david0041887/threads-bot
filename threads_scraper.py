@@ -38,10 +38,11 @@ class ScrapedPost:
     shortcode: str
     text: str
     username: str
+    media_id: str = ""
 
     @property
     def id(self) -> str:
-        return _shortcode_to_id(self.shortcode)
+        return self.media_id or _shortcode_to_id(self.shortcode)
 
 
 async def _ensure_logged_in(page, context) -> bool:
@@ -178,16 +179,20 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                         continue
                     seen_shortcodes.add(shortcode)
 
-                    # 用 JavaScript 往上遍歷找貼文文字和帳號
+                    # 用 JavaScript 往上遍歷找貼文文字、帳號、media ID
                     result = await link_el.evaluate("""el => {
                         let node = el;
                         let text = '';
                         let username = '';
+                        let mediaId = '';
                         for (let i = 0; i < 15; i++) {
                             node = node.parentElement;
                             if (!node) break;
                             const t = (node.innerText || '').trim();
-                            if (t.length > 50) { text = t.slice(0, 500); break; }
+                            // 嘗試抓 data-id / data-post-id 等屬性
+                            const did = node.getAttribute('data-id') || node.getAttribute('data-post-id') || node.getAttribute('data-media-id');
+                            if (did && /^\\d{10,}$/.test(did)) mediaId = did;
+                            if (!text && t.length > 50) text = t.slice(0, 500);
                         }
                         node = el;
                         for (let i = 0; i < 15; i++) {
@@ -199,11 +204,12 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                                 break;
                             }
                         }
-                        return {text: text, username: username};
+                        return {text: text, username: username, mediaId: mediaId};
                     }""")
 
                     raw_text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
+                    media_id = (result.get("mediaId") or "").strip() or _shortcode_to_id(shortcode)
 
                     # 去除開頭的帳號名稱、時間戳、hashtag 等短行雜訊
                     lines = raw_text.splitlines()
@@ -222,7 +228,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                     if username.lower() == my_username:
                         continue
 
-                    posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username))
+                    posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username, media_id=media_id))
                     if len(posts) >= limit:
                         break
 
