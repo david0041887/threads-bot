@@ -49,13 +49,29 @@ async def _ensure_logged_in(page, context) -> bool:
     cookies_env = os.environ.get("THREADS_COOKIES", "")
     if cookies_env:
         try:
-            cookies = json.loads(cookies_env)
-            # Playwright 需要 cookies 含有 domain 欄位
-            for c in cookies:
-                if "domain" not in c:
-                    c["domain"] = ".threads.com"
-            await context.add_cookies(cookies)
-            logger.info(f"[海巡] 已從環境變數載入 {len(cookies)} 個 cookies")
+            raw = json.loads(cookies_env)
+            pw_cookies = []
+            for c in raw:
+                pw = {
+                    "name": c["name"],
+                    "value": c["value"],
+                    "domain": c.get("domain", ".threads.com"),
+                    "path": c.get("path", "/"),
+                }
+                # Cookie-Editor 用 expirationDate，Playwright 用 expires
+                exp = c.get("expirationDate") or c.get("expires")
+                if exp and exp > 0:
+                    pw["expires"] = int(exp)
+                if "httpOnly" in c:
+                    pw["httpOnly"] = bool(c["httpOnly"])
+                if "secure" in c:
+                    pw["secure"] = bool(c["secure"])
+                # 修正 sameSite 值
+                ss = c.get("sameSite", "Lax")
+                pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), ss)
+                pw_cookies.append(pw)
+            await context.add_cookies(pw_cookies)
+            logger.info(f"[海巡] 已從環境變數載入 {len(pw_cookies)} 個 cookies")
         except Exception as e:
             logger.warning(f"[海巡] THREADS_COOKIES 解析失敗: {e}")
 
