@@ -202,15 +202,27 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                         return {text: text, username: username};
                     }""")
 
-                    text = (result.get("text") or "").strip()
+                    raw_text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
+
+                    # 去除開頭的帳號名稱、時間戳、hashtag 等短行雜訊
+                    lines = raw_text.splitlines()
+                    clean_lines = []
+                    skipping = True
+                    for line in lines:
+                        s = line.strip()
+                        if skipping and (not s or len(s) < 15 or re.match(r"^\d+[hdw]$|^@?\w{1,20}$", s)):
+                            continue
+                        skipping = False
+                        clean_lines.append(s)
+                    text = "\n".join(clean_lines).strip() or raw_text
+
                     if not text or len(text) < 20:
                         continue
                     if username.lower() == my_username:
                         continue
 
                     posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username))
-                    logger.debug(f"[海巡] 擷取: @{username} shortcode={shortcode} text={text[:40]}")
                     if len(posts) >= limit:
                         break
 

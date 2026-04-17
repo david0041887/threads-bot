@@ -248,6 +248,7 @@ async def proactive_patrol_job(force: bool = False):
                 post_text=post.text,
                 keyword=keyword,
             )
+            logger.info(f"[海巡] @{post.username} reply_text_len={len(reply_text)} preview={reply_text[:40]!r}")
 
             if not reply_text:
                 continue
