@@ -219,9 +219,11 @@ async def proactive_patrol_job(force: bool = False):
         logger.warning("[海巡] Playwright 不可用，跳過本次海巡")
         return
 
-    # Phase 1：搜尋貼文，篩選出要回覆的清單
+    # Phase 1：一個 browser session 完成搜尋 + Claude 生成 + UI 回覆
     try:
-        results = await search_threads_by_keyword_async(keyword=keyword, limit=20)
+        # search_and_reply_async 會先搜尋並回傳貼文清單；reply_tasks 初始為空
+        search_result = await search_and_reply_async(keyword=keyword, reply_tasks=[])
+        results = search_result.get("posts", [])
     except Exception as e:
         logger.error(f"[海巡] 爬蟲搜尋失敗: {e}")
         return
@@ -256,7 +258,7 @@ async def proactive_patrol_job(force: bool = False):
         logger.info("[海巡] 無合適貼文可回覆")
         return
 
-    # Phase 2：用同一瀏覽器 session 做 UI 回覆
+    # Phase 2：用新的 browser session 做 UI 回覆（帶 reply_tasks）
     try:
         result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks)
         for sc in result.get("replied", []):
