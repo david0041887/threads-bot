@@ -254,21 +254,23 @@ async def proactive_patrol_job(force: bool = False):
                 continue
 
             try:
-                logger.info(f"[海巡] 使用 media_id={post.id} (shortcode={post.shortcode})")
-                new_reply_id = client.reply_to_comment(reply_id=post.id, text=reply_text)
+                # Threads Graph API 無法透過爬取方式取得他人貼文的 Graph API ID，
+                # 改為發布提及對方的獨立貼文（@mention），效果等同於在對話中補充。
+                mention_text = f"@{post.username} {reply_text}"
+                new_post_id = client.create_post(text=mention_text)
                 replied += 1
                 daily_proactive_count[session] += 1
-                logger.info(f"[海巡] 已回覆 @{post.username} (shortcode={post.shortcode})")
+                logger.info(f"[海巡] 已發布提及貼文 @{post.username} post_id={new_post_id}")
 
                 send_telegram(
-                    f"🔍 海巡回覆通知\n"
+                    f"🔍 海巡提及通知\n"
                     f"關鍵字：{keyword}\n"
                     f"@{post.username}：{post.text[:80]}...\n"
                     f"─────────────\n"
-                    f"回覆內容：\n{reply_text}"
+                    f"發文內容：\n{mention_text}"
                 )
             except Exception as e:
-                logger.error(f"[海巡] 回覆失敗 (shortcode={post.shortcode}): {e}")
+                logger.error(f"[海巡] 發文失敗 (shortcode={post.shortcode}): {e}")
 
     except Exception as e:
         logger.error(f"[海巡] 執行失敗: {e}")
