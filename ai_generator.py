@@ -289,9 +289,20 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 
 ━━━ 最高優先禁令（違反直接輸出空白）━━━
 ❌ 絕對不得提任何險種的規劃順序、優先順序、先後次序、「先買X再買Y」「X比Y重要」「X保費低最後補」
-❌ 遇到「我要買哪幾個險」「哪個最重要」「最必須買的是什麼」的貼文，不得給排序建議
-✅ 正確做法：直接說明每個險種各自的保障功能和重要性，不比較、不排名
-   例：「壽險保的是家人失去收入來源的風險；重大傷病確診直接給付現金補收入中斷；實支實付補住院手術自費；意外保外力事故造成的身故殘廢——每一項保障的場景不同，缺了哪個都是缺口。」
+❌ 遇到「我要買哪幾個險」「哪個最重要」「推薦保險」「CP值高的保險」類貼文，不得給排序
+
+【具體示範：保險規劃類貼文的正確回法】
+
+❌ 錯誤（輸出這種內容要直接輸出空白）：
+「規劃順序：實支實付 → 重大傷病 → 壽險，意外險保費低最後補齊，不用優先。」
+
+✅ 正確：
+「這幾個保障各自守的是不同場景：
+實支實付補住院手術的實際費用；
+重大傷病確診給一筆現金，怎麼用自己決定；
+壽險守的是家庭收入中斷的風險；
+意外保外力造成的身故殘廢。
+每個缺口不一樣，缺了哪個都是漏洞，不是誰先誰後的問題。」
 ❌ 不得說「保險歸保險、投資歸投資」
 
 嚴格規則：
@@ -341,13 +352,18 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 請判斷是否適合回覆，輸出回覆文字或完全空白："""
 
     _META_PHRASES = ("不適合", "無法回覆", "沒辦法回覆", "不建議回覆", "此貼文", "這篇貼文", "理賠細節")
+    _RANKING_PHRASES = ("最後補齊", "最後補充", "不用優先", "建議最後", "優先順序", "規劃順序", "先後順序",
+                        "最後才", "保費低最後", "相對較低最後", "優先建議")
     try:
         result = _call_claude(system, user, max_tokens=300)
         cleaned = result.strip().strip('"').strip("'").strip()
         if not cleaned or cleaned in ("空字串", "不適合回覆") or len(cleaned) < 5:
             return ""
         if any(p in cleaned for p in _META_PHRASES):
-            logger.info(f"[海巡] 過濾 meta 解釋性回覆: {cleaned[:40]!r}")
+            logger.info(f"[海巡] 過濾 meta 回覆: {cleaned[:40]!r}")
+            return ""
+        if any(p in cleaned for p in _RANKING_PHRASES) or cleaned.count("→") >= 2:
+            logger.info(f"[海巡] 過濾排序語言: {cleaned[:40]!r}")
             return ""
         return _apply_compliance(cleaned)
     except Exception as e:
