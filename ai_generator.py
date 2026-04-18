@@ -244,6 +244,7 @@ def generate_reply(
 - 不超過 150 字
 - 直接輸出回覆文字，不加任何說明或引號
 - 不加 hashtag
+- 適當換行分段，不要全部文字接在一起
 - 若留言是問題，給出實質回答；若是閒聊，輕鬆回應
 - 若留言有購買意向或詢問細節，自然引導對方私訊了解
 """
@@ -276,12 +277,15 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 - 不提具體保險公司或商品名稱
 - 不招攬，不說「我可以幫你規劃」「歡迎聯絡我」等直接招攬語
 - 不超過 120 字
-- 繁體中文，自然口語
-- 若貼文內容不適合回覆（廣告、與保險無關、已有完整正確答案），輸出空字串
-- 直接輸出回覆文字或空字串，不加任何說明
+- 繁體中文，自然口語，適當換行分段，不要全部文字接在一起
 - 不要在文字中加 @username 或任何 @tag
-- 【關鍵】若涉及險種選擇，一定遵守：先定期後終身、先大風險後小風險
+- 絕對不依險種比較重要性或建議優先順序，每個保障都同等重要
 - 【關鍵】絕對不能暗示終身險比定期好，不能美化儲蓄險功能
+
+【判斷是否適合回覆】
+不適合的情況：廣告貼文、與保險完全無關、具體理賠細節詢問（如哪些收據可報銷、理賠金額計算）
+不適合時：你的輸出必須是完全空白，一個字都沒有，絕對不得輸出任何解釋或理由
+適合時：直接輸出回覆文字，不加任何前綴說明
 """
 
     user = f"""搜尋關鍵字：{keyword}
@@ -289,15 +293,18 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 他人的 Threads 貼文內容：
 {post_text}
 
-請判斷是否適合回覆，並生成補充知識的回覆（或空字串）："""
+請判斷是否適合回覆，輸出回覆文字或完全空白："""
 
+    _META_PHRASES = ("不適合", "無法回覆", "沒辦法回覆", "不建議回覆", "此貼文", "這篇貼文", "理賠細節")
     try:
         result = _call_claude(system, user, max_tokens=300)
         cleaned = result.strip().strip('"').strip("'").strip()
         if not cleaned or cleaned in ("空字串", "不適合回覆") or len(cleaned) < 5:
             return ""
-        result = cleaned
-        return _apply_compliance(result.strip())
+        if any(p in cleaned for p in _META_PHRASES):
+            logger.info(f"[海巡] 過濾 meta 解釋性回覆: {cleaned[:40]!r}")
+            return ""
+        return _apply_compliance(cleaned)
     except Exception as e:
         logger.error(f"主動回覆生成失敗: {e}")
         return ""
