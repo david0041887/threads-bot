@@ -39,6 +39,10 @@ pending_jobs: dict[str, dict] = {}
 pending_replies: dict[str, dict] = {}
 processed_proactive_ids: set = set()
 
+# Telegram message_id → {"type": "draft"|"reply", "job_id": str}
+# 用於直接回覆 TG 訊息審核，無需輸入 job_id
+tg_msg_to_job: dict[int, dict] = {}
+
 _PROCESSED_FILE = Path("processed_reply_ids.json")
 
 def _load_processed_ids() -> set:
@@ -146,7 +150,9 @@ async def daily_draft_job():
         drafts = generate_post_drafts(articles, count=3)
         job_id = str(uuid.uuid4())[:8]
         pending_jobs[job_id] = {"drafts": drafts, "status": "pending"}
-        notify_drafts_for_approval(drafts, job_id=job_id)
+        msg_id = notify_drafts_for_approval(drafts, job_id=job_id)
+        if msg_id:
+            tg_msg_to_job[msg_id] = {"type": "draft", "job_id": job_id}
     except Exception as e:
         logger.error(f"每日草稿任務失敗: {e}")
         notify_error(str(e))
@@ -191,7 +197,9 @@ async def poll_replies_job():
                     "post_text": post.text,
                     "status": "pending",
                 }
-                notify_reply_for_approval(reply_job_id, reply.username, reply.text, reply_text, post.text)
+                msg_id = notify_reply_for_approval(reply_job_id, reply.username, reply.text, reply_text, post.text)
+                if msg_id:
+                    tg_msg_to_job[msg_id] = {"type": "reply", "job_id": reply_job_id}
     except Exception as e:
         logger.error(f"輪詢留言失敗: {e}")
     finally:
@@ -349,7 +357,41 @@ async def approve_draft(job_id: str, choice: str):
 async def telegram_message_handler(request: Request):
     import asyncio, re as _re
     payload = await request.json()
-    text = payload.get("message", {}).get("text", "").strip()
+    msg = payload.get("message", {})
+    text = msg.get("text", "").strip()
+
+    # ── 直接回覆 TG 訊息審核 ─────────────────────────
+    replied_msg = msg.get("reply_to_message", {})
+    replied_msg_id = replied_msg.get("message_id")
+    if replied_msg_id and replied_msg_id in tg_msg_to_job:
+        job_info = tg_msg_to_job[replied_msg_id]
+        cmd = text.strip()
+
+        if job_info["type"] == "draft":
+            if cmd in ("跳過", "skip"):
+                await approve_draft(job_id=job_info["job_id"], choice="skip")
+                send_telegram("⏭ 今日發文已跳過")
+            elif cmd in ("1", "2", "3"):
+                result = await approve_draft(job_id=job_info["job_id"], choice=cmd)
+                if result.get("status") == "published":
+                    send_telegram(f"✅ 草稿 {cmd} 已發出！post_id: {result.get('post_id')}")
+                else:
+                    send_telegram(f"❌ 發文失敗：{result}")
+            else:
+                send_telegram(f"❓ 請回覆「1」「2」「3」選草稿，或「跳過」略過")
+            return JSONResponse({"ok": True})
+
+        if job_info["type"] == "reply":
+            if cmd in ("略過", "跳過", "skip"):
+                await approve_reply(reply_job_id=job_info["job_id"], action="skip")
+                send_telegram("⏭ 已略過此則留言")
+            else:
+                result = await approve_reply(reply_job_id=job_info["job_id"], action="send")
+                if result.get("status") == "replied":
+                    send_telegram("✅ 回覆已發出")
+                else:
+                    send_telegram(f"❌ 回覆失敗：{result}")
+            return JSONResponse({"ok": True})
 
     # ── 海巡控制 ──────────────────────────────────────
     if text == "海巡暫停":
