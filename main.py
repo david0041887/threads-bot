@@ -35,8 +35,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
-pending_jobs: dict[str, dict] = {}
-pending_replies: dict[str, dict] = {}
+pending_jobs: dict[str, dict] = {}      # 啟動後從磁碟載入
+pending_replies: dict[str, dict] = {}   # 啟動後從磁碟載入
 processed_proactive_ids: set = set()
 
 # Telegram message_id → {"type": "draft"|"reply", "job_id": str}
@@ -44,6 +44,8 @@ processed_proactive_ids: set = set()
 tg_msg_to_job: dict[int, dict] = {}
 
 _PROCESSED_FILE = Path("processed_reply_ids.json")
+_PENDING_JOBS_FILE = Path("pending_jobs.json")
+_PENDING_REPLIES_FILE = Path("pending_replies.json")
 
 def _load_processed_ids() -> set:
     try:
@@ -57,7 +59,33 @@ def _save_processed_ids(ids: set):
     except Exception as e:
         logger.warning(f"無法儲存已處理留言 ID: {e}")
 
+def _load_pending_jobs() -> dict:
+    try:
+        return json.loads(_PENDING_JOBS_FILE.read_text())
+    except Exception:
+        return {}
+
+def _save_pending_jobs():
+    try:
+        _PENDING_JOBS_FILE.write_text(json.dumps(pending_jobs, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"無法儲存 pending_jobs: {e}")
+
+def _load_pending_replies() -> dict:
+    try:
+        return json.loads(_PENDING_REPLIES_FILE.read_text())
+    except Exception:
+        return {}
+
+def _save_pending_replies():
+    try:
+        _PENDING_REPLIES_FILE.write_text(json.dumps(pending_replies, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"無法儲存 pending_replies: {e}")
+
 processed_reply_ids: set = _load_processed_ids()
+pending_jobs.update(_load_pending_jobs())
+pending_replies.update(_load_pending_replies())
 
 SEARCH_KEYWORDS = [
     "保險", "壽險", "醫療險", "遺產稅", "節稅", "保費",
@@ -150,6 +178,7 @@ async def daily_draft_job():
         drafts = generate_post_drafts(articles, count=3)
         job_id = str(uuid.uuid4())[:8]
         pending_jobs[job_id] = {"drafts": drafts, "status": "pending"}
+        _save_pending_jobs()
         msg_id = notify_drafts_for_approval(drafts, job_id=job_id)
         if msg_id:
             tg_msg_to_job[msg_id] = {"type": "draft", "job_id": job_id}
@@ -197,6 +226,7 @@ async def poll_replies_job():
                     "post_text": post.text,
                     "status": "pending",
                 }
+                _save_pending_replies()
                 msg_id = notify_reply_for_approval(reply_job_id, reply.username, reply.text, reply_text, post.text)
                 if msg_id:
                     tg_msg_to_job[msg_id] = {"type": "reply", "job_id": reply_job_id}
@@ -310,11 +340,13 @@ async def approve_reply(reply_job_id: str, action: str):
         raise HTTPException(status_code=409, detail="此任務已處理")
     if action == "skip":
         job["status"] = "skipped"
+        _save_pending_replies()
         return {"status": "skipped"}
     client = get_client()
     try:
         new_reply_id = client.reply_to_comment(reply_id=job["reply_id"], text=job["reply_text"])
         job["status"] = "replied"
+        _save_pending_replies()
         return {"status": "replied", "reply_id": new_reply_id}
     except Exception as e:
         job["status"] = "error"
@@ -332,6 +364,7 @@ async def approve_draft(job_id: str, choice: str):
         raise HTTPException(status_code=409, detail="此任務已處理")
     if choice == "skip":
         job["status"] = "skipped"
+        _save_pending_jobs()
         return {"status": "skipped"}
     try:
         idx = int(choice) - 1
@@ -344,6 +377,7 @@ async def approve_draft(job_id: str, choice: str):
         post_id = client.create_post(text=job["drafts"][idx]["draft"])
         job["status"] = "published"
         job["post_id"] = post_id
+        _save_pending_jobs()
         return {"status": "published", "post_id": post_id}
     except Exception as e:
         job["status"] = "error"
@@ -363,8 +397,19 @@ async def telegram_message_handler(request: Request):
     # ── 直接回覆 TG 訊息審核 ─────────────────────────
     replied_msg = msg.get("reply_to_message", {})
     replied_msg_id = replied_msg.get("message_id")
-    if replied_msg_id and replied_msg_id in tg_msg_to_job:
-        job_info = tg_msg_to_job[replied_msg_id]
+
+    # 優先從記憶體 map 取，fallback 從訊息文字解析 job_id（重啟後仍可用）
+    job_info = tg_msg_to_job.get(replied_msg_id) if replied_msg_id else None
+    if not job_info and replied_msg:
+        replied_text = replied_msg.get("text", "")
+        draft_m = _re.search(r'\[job:(\w+)\]', replied_text)
+        reply_m = _re.search(r'\[reply_job:(\w+)\]', replied_text)
+        if draft_m:
+            job_info = {"type": "draft", "job_id": draft_m.group(1)}
+        elif reply_m:
+            job_info = {"type": "reply", "job_id": reply_m.group(1)}
+
+    if job_info:
         cmd = text.strip()
 
         if job_info["type"] == "draft":

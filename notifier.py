@@ -45,7 +45,8 @@ def notify_drafts_for_approval(drafts: list[dict], job_id: str) -> Optional[int]
         lines.append("─" * 20)
         lines.append(draft)
         lines.append("")
-    lines.append("💬 直接回覆此訊息：「1」「2」「3」選草稿，「跳過」略過")
+    lines.append(f"💬 直接回覆此訊息：「1」「2」「3」選草稿，「跳過」略過")
+    lines.append(f"[job:{job_id}]")
     return send_telegram("\n".join(lines))
 
 
@@ -58,7 +59,8 @@ def notify_reply_for_approval(reply_job_id: str, commenter: str, comment_text: s
         f"─────────────\n"
         f"AI 回覆：\n{reply_text}\n"
         f"─────────────\n"
-        f"直接回覆「發出」送出，「略過」跳過"
+        f"直接回覆「發出」送出，「略過」跳過\n"
+        f"[reply_job:{reply_job_id}]"
     )
     return send_telegram(message)
 
