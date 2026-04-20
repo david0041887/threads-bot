@@ -18,15 +18,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+import state
 from threads_client import ThreadsClient
 from ai_generator import generate_post_drafts, generate_reply, generate_daily_topics, generate_proactive_reply
 from notifier import notify_drafts_for_approval, notify_error, notify_reply_for_approval, send_telegram
-try:
-    from threads_scraper import search_threads_by_keyword_async, search_and_reply_async
-    PLAYWRIGHT_AVAILABLE = True
-except Exception:
-    PLAYWRIGHT_AVAILABLE = False
-    logger.warning("Playwright 未安裝，海巡功能停用")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,26 +29,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+try:
+    from threads_scraper import search_threads_by_keyword_async, search_and_reply_async
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    PLAYWRIGHT_AVAILABLE = False
+    logger.warning("Playwright 未安裝，海巡功能停用")
+
 scheduler = AsyncIOScheduler()
-pending_jobs: dict[str, dict] = {}
-pending_replies: dict[str, dict] = {}
-processed_proactive_ids: set = set()
-
-_PROCESSED_FILE = Path("processed_reply_ids.json")
-
-def _load_processed_ids() -> set:
-    try:
-        return set(json.loads(_PROCESSED_FILE.read_text()))
-    except Exception:
-        return set()
-
-def _save_processed_ids(ids: set):
-    try:
-        _PROCESSED_FILE.write_text(json.dumps(list(ids)))
-    except Exception as e:
-        logger.warning(f"無法儲存已處理留言 ID: {e}")
-
-processed_reply_ids: set = _load_processed_ids()
 
 SEARCH_KEYWORDS = [
     "保險", "壽險", "醫療險", "遺產稅", "節稅", "保費",
@@ -68,8 +51,18 @@ PATROL_SCHEDULE = {
     "evening": {"hour": "20-23", "count": 8},
 }
 
-# 當日已發出的主動回覆數
-daily_proactive_count = {"morning": 0, "noon": 0, "evening": 0, "date": ""}
+_COUNTS_KEY = "daily_proactive_count"
+_COUNTS_DEFAULT = {"morning": 0, "noon": 0, "evening": 0, "date": ""}
+
+
+def _get_counts() -> dict:
+    return state.get_kv(_COUNTS_KEY, _COUNTS_DEFAULT.copy())
+
+
+def _bump_count(session: str) -> None:
+    c = _get_counts()
+    c[session] = c.get(session, 0) + 1
+    state.set_kv(_COUNTS_KEY, c)
 
 
 def get_client() -> ThreadsClient:
@@ -99,8 +92,9 @@ def reset_daily_count():
     from datetime import datetime
     import pytz
     today = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d")
-    if daily_proactive_count["date"] != today:
-        daily_proactive_count.update({"morning": 0, "noon": 0, "evening": 0, "date": today})
+    c = _get_counts()
+    if c.get("date") != today:
+        state.set_kv(_COUNTS_KEY, {"morning": 0, "noon": 0, "evening": 0, "date": today})
 
 
 def _ensure_chromium():
@@ -123,6 +117,7 @@ def _ensure_chromium():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    state.init_db()
     _ensure_chromium()
     scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), id="daily_draft", replace_existing=True)
     # poll_replies 暫停（待確認 UI 回覆正常後啟用）
@@ -130,6 +125,7 @@ async def lifespan(app: FastAPI):
     # 海巡暫停（UI 回覆測試中）
     # scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
+    scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
     scheduler.start()
     logger.info("Scheduler 啟動")
     yield
@@ -145,7 +141,7 @@ async def daily_draft_job():
         articles = generate_daily_topics()
         drafts = generate_post_drafts(articles, count=3)
         job_id = str(uuid.uuid4())[:8]
-        pending_jobs[job_id] = {"drafts": drafts, "status": "pending"}
+        state.save_pending_job(job_id, {"drafts": drafts})
         notify_drafts_for_approval(drafts, job_id=job_id)
     except Exception as e:
         logger.error(f"每日草稿任務失敗: {e}")
@@ -162,18 +158,16 @@ async def poll_replies_job():
         for post in posts:
             replies = client.get_replies(post.id, limit=10)
             for reply in replies:
-                if reply.id in processed_reply_ids:
+                if state.is_processed("reply", reply.id):
                     continue
                 # 若我們帳號已回覆過此留言，直接標記處理並跳過
                 if my_username:
                     sub_replies = client.get_sub_replies(reply.id)
                     if any(sr.username.lower() == my_username for sr in sub_replies):
-                        processed_reply_ids.add(reply.id)
-                        _save_processed_ids(processed_reply_ids)
+                        state.mark_processed("reply", reply.id)
                         logger.info(f"已跳過已回覆留言 @{reply.username}: {reply.text[:30]}")
                         continue
-                processed_reply_ids.add(reply.id)
-                _save_processed_ids(processed_reply_ids)
+                state.mark_processed("reply", reply.id)
                 if not reply.text:
                     continue
                 logger.info(f"發現新留言: @{reply.username}: {reply.text[:50]}")
@@ -183,14 +177,13 @@ async def poll_replies_job():
                     commenter_username=reply.username,
                 )
                 reply_job_id = str(uuid.uuid4())[:8]
-                pending_replies[reply_job_id] = {
+                state.save_pending_reply(reply_job_id, {
                     "reply_id": reply.id,
                     "reply_text": reply_text,
                     "commenter": reply.username,
                     "comment_text": reply.text,
                     "post_text": post.text,
-                    "status": "pending",
-                }
+                })
                 notify_reply_for_approval(reply_job_id, reply.username, reply.text, reply_text, post.text)
     except Exception as e:
         logger.error(f"輪詢留言失敗: {e}")
@@ -208,7 +201,7 @@ async def proactive_patrol_job(force: bool = False):
         session = "morning"
 
     quota = PATROL_SCHEDULE[session]["count"]
-    used = daily_proactive_count[session]
+    used = _get_counts().get(session, 0)
     if used >= quota:
         logger.info(f"[海巡] {session} 時段配額已用完 ({used}/{quota})")
         return
@@ -240,7 +233,7 @@ async def proactive_patrol_job(force: bool = False):
     for post in results:
         if len(reply_tasks) >= batch:
             break
-        if post.shortcode in processed_proactive_ids:
+        if state.is_processed("proactive", post.shortcode):
             continue
         if not post.text or len(post.text) < 20:
             continue
@@ -248,7 +241,7 @@ async def proactive_patrol_job(force: bool = False):
         logger.info(f"[海巡] @{post.username} reply_len={len(reply_text)} preview={reply_text[:40]!r}")
         if not reply_text:
             continue
-        processed_proactive_ids.add(post.shortcode)
+        state.mark_processed("proactive", post.shortcode)
         reply_tasks.append({
             "shortcode": post.shortcode,
             "username": post.username,
@@ -264,7 +257,7 @@ async def proactive_patrol_job(force: bool = False):
     try:
         result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks)
         for sc in result.get("replied", []):
-            daily_proactive_count[session] += 1
+            _bump_count(session)
             task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
             logger.info(f"[海巡] UI 回覆成功 @{task.get('username')} shortcode={sc}")
             send_telegram(
@@ -295,21 +288,21 @@ async def refresh_token_job():
 
 @app.post("/approve-reply/{reply_job_id}/{action}")
 async def approve_reply(reply_job_id: str, action: str):
-    job = pending_replies.get(reply_job_id)
+    job = state.get_pending_reply(reply_job_id)
     if not job:
         raise HTTPException(status_code=404, detail="找不到此留言任務")
     if job["status"] != "pending":
         raise HTTPException(status_code=409, detail="此任務已處理")
     if action == "skip":
-        job["status"] = "skipped"
+        state.update_reply(reply_job_id, "skipped")
         return {"status": "skipped"}
     client = get_client()
     try:
         new_reply_id = client.reply_to_comment(reply_id=job["reply_id"], text=job["reply_text"])
-        job["status"] = "replied"
+        state.update_reply(reply_job_id, "replied", {"new_reply_id": new_reply_id})
         return {"status": "replied", "reply_id": new_reply_id}
     except Exception as e:
-        job["status"] = "error"
+        state.update_reply(reply_job_id, "error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         client.close()
@@ -317,13 +310,13 @@ async def approve_reply(reply_job_id: str, action: str):
 
 @app.post("/approve/{job_id}/{choice}")
 async def approve_draft(job_id: str, choice: str):
-    job = pending_jobs.get(job_id)
+    job = state.get_pending_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="找不到此草稿任務")
     if job["status"] != "pending":
         raise HTTPException(status_code=409, detail="此任務已處理")
     if choice == "skip":
-        job["status"] = "skipped"
+        state.update_job(job_id, "skipped")
         return {"status": "skipped"}
     try:
         idx = int(choice) - 1
@@ -334,11 +327,10 @@ async def approve_draft(job_id: str, choice: str):
     client = get_client()
     try:
         post_id = client.create_post(text=job["drafts"][idx]["draft"])
-        job["status"] = "published"
-        job["post_id"] = post_id
+        state.update_job(job_id, "published", {"post_id": post_id})
         return {"status": "published", "post_id": post_id}
     except Exception as e:
-        job["status"] = "error"
+        state.update_job(job_id, "error", {"error": str(e)})
         notify_error(f"發文失敗: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -424,7 +416,7 @@ async def manual_patrol():
 
 @app.get("/admin/patrol-stats")
 async def patrol_stats():
-    return {"daily_count": daily_proactive_count}
+    return {"daily_count": _get_counts()}
 
 
 @app.get("/admin/env-check")
@@ -508,7 +500,7 @@ async def test_login():
 
 @app.get("/admin/pending-jobs")
 async def list_pending_jobs():
-    return {jid: {"status": j["status"], "draft_count": len(j.get("drafts", []))} for jid, j in pending_jobs.items()}
+    return {jid: {"status": j["status"], "draft_count": len(j.get("drafts", []))} for jid, j in state.list_pending_jobs().items()}
 
 
 @app.get("/health")
