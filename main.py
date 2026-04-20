@@ -491,6 +491,15 @@ async def telegram_message_handler(request: Request):
                     send_telegram(f"❌ 回覆失敗：{e}")
             return JSONResponse({"ok": True})
 
+    # ── 草稿觸發 ──────────────────────────────────────
+    if text == "觸發草稿":
+        send_telegram("⏳ 正在產生草稿，請稍候...")
+        try:
+            await daily_draft_job()
+        except Exception as e:
+            send_telegram(f"❌ 草稿產生失敗：{e}")
+        return JSONResponse({"ok": True})
+
     # ── 海巡控制 ──────────────────────────────────────
     if text == "海巡暫停":
         try:
