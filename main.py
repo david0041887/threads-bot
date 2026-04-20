@@ -387,6 +387,26 @@ async def approve_draft(job_id: str, choice: str):
         client.close()
 
 
+def _parse_draft_from_tg_msg(tg_text: str, choice: int) -> str:
+    """從 TG 草稿審核訊息解析出指定編號的草稿內容（伺服器重啟後 job 消失時使用）。"""
+    import re as _re2
+    SEP = "─" * 20
+    parts = _re2.split(r'【\d+】', tg_text)
+    if len(parts) <= choice:
+        return ""
+    section = parts[choice]
+    if SEP in section:
+        after = section.split(SEP, 1)[1]
+        lines = after.strip().split("\n")
+        draft_lines = []
+        for line in lines:
+            if line.startswith("💬") or line.startswith("[job:"):
+                break
+            draft_lines.append(line)
+        return "\n".join(draft_lines).strip()
+    return ""
+
+
 @app.post("/webhook/telegram")
 async def telegram_message_handler(request: Request):
     import asyncio, re as _re
@@ -414,28 +434,61 @@ async def telegram_message_handler(request: Request):
 
         if job_info["type"] == "draft":
             if cmd in ("跳過", "skip"):
-                await approve_draft(job_id=job_info["job_id"], choice="skip")
+                try:
+                    await approve_draft(job_id=job_info["job_id"], choice="skip")
+                except Exception:
+                    pass
                 send_telegram("⏭ 今日發文已跳過")
             elif cmd in ("1", "2", "3"):
-                result = await approve_draft(job_id=job_info["job_id"], choice=cmd)
-                if result.get("status") == "published":
-                    send_telegram(f"✅ 草稿 {cmd} 已發出！post_id: {result.get('post_id')}")
-                else:
-                    send_telegram(f"❌ 發文失敗：{result}")
+                try:
+                    result = await approve_draft(job_id=job_info["job_id"], choice=cmd)
+                    if result.get("status") == "published":
+                        send_telegram(f"✅ 草稿 {cmd} 已發出！post_id: {result.get('post_id')}")
+                    else:
+                        send_telegram(f"❌ 發文失敗：{result}")
+                except HTTPException as e:
+                    if e.status_code == 404:
+                        # 伺服器重啟後 job 消失，從 TG 訊息文字直接解析草稿並發文
+                        draft_text = _parse_draft_from_tg_msg(
+                            replied_msg.get("text", ""), int(cmd)
+                        )
+                        if draft_text:
+                            client = get_client()
+                            try:
+                                post_id = client.create_post(text=draft_text)
+                                send_telegram(f"✅ 草稿 {cmd} 已發出！post_id: {post_id}")
+                            except Exception as post_err:
+                                send_telegram(f"❌ 發文失敗：{post_err}")
+                            finally:
+                                client.close()
+                        else:
+                            send_telegram("❌ 找不到草稿內容，請重新觸發草稿（/admin/trigger-draft）")
+                    else:
+                        send_telegram(f"❌ 發文失敗：{e.detail}")
+                except Exception as e:
+                    send_telegram(f"❌ 發文失敗：{e}")
             else:
-                send_telegram(f"❓ 請回覆「1」「2」「3」選草稿，或「跳過」略過")
+                send_telegram("❓ 請回覆「1」「2」「3」選草稿，或「跳過」略過")
             return JSONResponse({"ok": True})
 
         if job_info["type"] == "reply":
             if cmd in ("略過", "跳過", "skip"):
-                await approve_reply(reply_job_id=job_info["job_id"], action="skip")
+                try:
+                    await approve_reply(reply_job_id=job_info["job_id"], action="skip")
+                except Exception:
+                    pass
                 send_telegram("⏭ 已略過此則留言")
             else:
-                result = await approve_reply(reply_job_id=job_info["job_id"], action="send")
-                if result.get("status") == "replied":
-                    send_telegram("✅ 回覆已發出")
-                else:
-                    send_telegram(f"❌ 回覆失敗：{result}")
+                try:
+                    result = await approve_reply(reply_job_id=job_info["job_id"], action="send")
+                    if result.get("status") == "replied":
+                        send_telegram("✅ 回覆已發出")
+                    else:
+                        send_telegram(f"❌ 回覆失敗：{result}")
+                except HTTPException as e:
+                    send_telegram(f"❌ 回覆任務已過期（伺服器重啟導致），請等待下次留言輪詢重新產生")
+                except Exception as e:
+                    send_telegram(f"❌ 回覆失敗：{e}")
             return JSONResponse({"ok": True})
 
     # ── 海巡控制 ──────────────────────────────────────
@@ -460,29 +513,41 @@ async def telegram_message_handler(request: Request):
             send_telegram(f"❌ 恢復失敗: {e}")
         return JSONResponse({"ok": True})
 
-    # ── 草稿審核 ──────────────────────────────────────
+    # ── 草稿審核（舊式：選 1 job_id）──────────────────
     m = _re.match(r"選\s*([123])\s+(\w+)", text)
     if m:
-        result = await approve_draft(job_id=m.group(2), choice=m.group(1))
-        if result.get("status") == "published":
-            send_telegram(f"✅ 已發文！post_id: {result.get('post_id')}")
+        try:
+            result = await approve_draft(job_id=m.group(2), choice=m.group(1))
+            if result.get("status") == "published":
+                send_telegram(f"✅ 已發文！post_id: {result.get('post_id')}")
+        except Exception as e:
+            send_telegram(f"❌ 發文失敗：{e}")
         return JSONResponse({"ok": True})
     m2 = _re.match(r"跳過\s+(\w+)", text)
     if m2:
-        await approve_draft(job_id=m2.group(1), choice="skip")
+        try:
+            await approve_draft(job_id=m2.group(1), choice="skip")
+        except Exception:
+            pass
         send_telegram("⏭ 今日發文已跳過")
         return JSONResponse({"ok": True})
 
-    # ── 留言回覆審核 ──────────────────────────────────
+    # ── 留言回覆審核（舊式：回覆 job_id）─────────────
     m3 = _re.match(r"回覆\s+(\w+)", text)
     if m3:
-        result = await approve_reply(reply_job_id=m3.group(1), action="send")
-        if result.get("status") == "replied":
-            send_telegram("✅ 回覆已發出")
+        try:
+            result = await approve_reply(reply_job_id=m3.group(1), action="send")
+            if result.get("status") == "replied":
+                send_telegram("✅ 回覆已發出")
+        except Exception as e:
+            send_telegram(f"❌ 回覆失敗：{e}")
         return JSONResponse({"ok": True})
     m4 = _re.match(r"略過\s+(\w+)", text)
     if m4:
-        await approve_reply(reply_job_id=m4.group(1), action="skip")
+        try:
+            await approve_reply(reply_job_id=m4.group(1), action="skip")
+        except Exception:
+            pass
         send_telegram("⏭ 已略過此則留言")
         return JSONResponse({"ok": True})
 
