@@ -45,8 +45,11 @@ def notify_drafts_for_approval(drafts: list[dict], job_id: str, channel: Optiona
         lines.append("─" * 20)
         lines.append(draft)
         lines.append("")
-    lines.append(f"✅ 在控制台填入 job_id 選擇發文")
-    lines.append(f"🔗 {CONTROL_URL}")
+    lines.append("💬 直接回此 TG：")
+    lines.append("  「1」「2」「3」發該篇草稿")
+    lines.append("  「跳過」今日不發")
+    lines.append(f"  job_id: {job_id}（多筆待審時用：選1 {job_id}）")
+    lines.append(f"🔗 備用：{CONTROL_URL}")
     message = "\n".join(lines)
     return send_telegram(message)
 
@@ -60,8 +63,10 @@ def notify_reply_for_approval(reply_job_id: str, commenter: str, comment_text: s
         f"─────────────\n"
         f"預計回覆：\n{reply_text}\n"
         f"─────────────\n"
-        f"✅ 在控制台填入 reply_job_id 確認回覆\n"
-        f"🔗 {CONTROL_URL}"
+        f"💬 直接回此 TG：\n"
+        f"  「回覆」送出 /「略過」不送\n"
+        f"  reply_job_id: {reply_job_id}（多筆待審時用：回覆 {reply_job_id}）\n"
+        f"🔗 備用：{CONTROL_URL}"
     )
     return send_telegram(message)
 

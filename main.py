@@ -366,28 +366,73 @@ async def telegram_message_handler(request: Request):
         return JSONResponse({"ok": True})
 
     # ── 草稿審核 ──────────────────────────────────────
-    m = _re.match(r"選\s*([123])\s+(\w+)", text)
+    # 長版：「選2 abc」、「2 abc」（指定 job_id）
+    m = _re.match(r"^(?:選\s*)?([123])\s+(\w+)$", text)
     if m:
         result = await approve_draft(job_id=m.group(2), choice=m.group(1))
         if result.get("status") == "published":
             send_telegram(f"✅ 已發文！post_id: {result.get('post_id')}")
         return JSONResponse({"ok": True})
-    m2 = _re.match(r"跳過\s+(\w+)", text)
-    if m2:
-        await approve_draft(job_id=m2.group(1), choice="skip")
+
+    # 短版：「選2」、「2」（最新一筆 pending）
+    m = _re.match(r"^(?:選\s*)?([123])$", text)
+    if m:
+        jid = state.latest_pending_job_id()
+        if not jid:
+            send_telegram("⚠️ 目前沒有待審核的草稿")
+            return JSONResponse({"ok": True})
+        result = await approve_draft(job_id=jid, choice=m.group(1))
+        if result.get("status") == "published":
+            send_telegram(f"✅ 已發文！post_id: {result.get('post_id')}")
+        return JSONResponse({"ok": True})
+
+    # 跳過 長版
+    m = _re.match(r"^跳過\s+(\w+)$", text)
+    if m:
+        await approve_draft(job_id=m.group(1), choice="skip")
+        send_telegram("⏭ 今日發文已跳過")
+        return JSONResponse({"ok": True})
+
+    # 跳過 短版
+    if text == "跳過":
+        jid = state.latest_pending_job_id()
+        if not jid:
+            send_telegram("⚠️ 目前沒有待審核的草稿")
+            return JSONResponse({"ok": True})
+        await approve_draft(job_id=jid, choice="skip")
         send_telegram("⏭ 今日發文已跳過")
         return JSONResponse({"ok": True})
 
     # ── 留言回覆審核 ──────────────────────────────────
-    m3 = _re.match(r"回覆\s+(\w+)", text)
-    if m3:
-        result = await approve_reply(reply_job_id=m3.group(1), action="send")
+    m = _re.match(r"^回覆\s+(\w+)$", text)
+    if m:
+        result = await approve_reply(reply_job_id=m.group(1), action="send")
         if result.get("status") == "replied":
             send_telegram("✅ 回覆已發出")
         return JSONResponse({"ok": True})
-    m4 = _re.match(r"略過\s+(\w+)", text)
-    if m4:
-        await approve_reply(reply_job_id=m4.group(1), action="skip")
+
+    if text == "回覆":
+        rjid = state.latest_pending_reply_id()
+        if not rjid:
+            send_telegram("⚠️ 目前沒有待審核的留言")
+            return JSONResponse({"ok": True})
+        result = await approve_reply(reply_job_id=rjid, action="send")
+        if result.get("status") == "replied":
+            send_telegram("✅ 回覆已發出")
+        return JSONResponse({"ok": True})
+
+    m = _re.match(r"^略過\s+(\w+)$", text)
+    if m:
+        await approve_reply(reply_job_id=m.group(1), action="skip")
+        send_telegram("⏭ 已略過此則留言")
+        return JSONResponse({"ok": True})
+
+    if text == "略過":
+        rjid = state.latest_pending_reply_id()
+        if not rjid:
+            send_telegram("⚠️ 目前沒有待審核的留言")
+            return JSONResponse({"ok": True})
+        await approve_reply(reply_job_id=rjid, action="skip")
         send_telegram("⏭ 已略過此則留言")
         return JSONResponse({"ok": True})
 

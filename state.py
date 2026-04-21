@@ -125,6 +125,22 @@ def list_pending_jobs() -> dict[str, dict]:
     }
 
 
+def latest_pending_job_id() -> Optional[str]:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT job_id FROM pending_jobs WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    return row["job_id"] if row else None
+
+
+def latest_pending_reply_id() -> Optional[str]:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT reply_job_id FROM pending_replies WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    return row["reply_job_id"] if row else None
+
+
 # ─── pending replies（留言審核） ───────────────────────────────
 
 def save_pending_reply(reply_job_id: str, payload: dict, status: str = "pending") -> None:
