@@ -413,6 +413,36 @@ async def telegram_message_handler(request: Request):
     msg = payload.get("message", {})
     text = msg.get("text", "").strip()
 
+    # ── 全域指令（最高優先，不受 reply context 影響）────
+    if text == "海巡暫停":
+        try:
+            scheduler.remove_job("proactive_patrol")
+        except Exception:
+            pass
+        try:
+            scheduler.remove_job("poll_replies")
+        except Exception:
+            pass
+        send_telegram("⏸ 海巡與留言回覆已暫停")
+        return JSONResponse({"ok": True})
+
+    if text == "海巡繼續":
+        try:
+            scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
+            scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
+            send_telegram("▶️ 海巡與留言回覆已恢復（每 15 分鐘海巡一次）")
+        except Exception as e:
+            send_telegram(f"❌ 恢復失敗: {e}")
+        return JSONResponse({"ok": True})
+
+    if text == "觸發草稿":
+        send_telegram("⏳ 正在產生草稿，請稍候...")
+        try:
+            await daily_draft_job()
+        except Exception as e:
+            send_telegram(f"❌ 草稿產生失敗：{e}")
+        return JSONResponse({"ok": True})
+
     # ── 直接回覆 TG 訊息審核 ─────────────────────────
     replied_msg = msg.get("reply_to_message", {})
     replied_msg_id = replied_msg.get("message_id")
@@ -491,37 +521,6 @@ async def telegram_message_handler(request: Request):
                 except Exception as e:
                     send_telegram(f"❌ 回覆失敗：{e}")
             return JSONResponse({"ok": True})
-
-    # ── 草稿觸發 ──────────────────────────────────────
-    if text == "觸發草稿":
-        send_telegram("⏳ 正在產生草稿，請稍候...")
-        try:
-            await daily_draft_job()
-        except Exception as e:
-            send_telegram(f"❌ 草稿產生失敗：{e}")
-        return JSONResponse({"ok": True})
-
-    # ── 海巡控制 ──────────────────────────────────────
-    if text == "海巡暫停":
-        try:
-            scheduler.remove_job("proactive_patrol")
-        except Exception:
-            pass
-        try:
-            scheduler.remove_job("poll_replies")
-        except Exception:
-            pass
-        send_telegram("⏸ 海巡與留言回覆已暫停")
-        return JSONResponse({"ok": True})
-
-    if text == "海巡繼續":
-        try:
-            scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-            scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
-            send_telegram("▶️ 海巡與留言回覆已恢復（每 15 分鐘海巡一次）")
-        except Exception as e:
-            send_telegram(f"❌ 恢復失敗: {e}")
-        return JSONResponse({"ok": True})
 
     # ── 草稿審核（舊式：選 1 job_id）──────────────────
     m = _re.match(r"選\s*([123])\s+(\w+)", text)

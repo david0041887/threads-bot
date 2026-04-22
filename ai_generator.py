@@ -500,6 +500,8 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
         "不用搶先", "彈性補齊", "彈性配置", "可視預算彈性",
         "意外險相對", "意外保費相對", "意外險保費低", "意外險反而", "意外險最後",
         "先把", "先補", "排在前面", "排在後面",
+        "通常順序", "順序是", "投資歸投資", "保險歸保險",
+        "都沒做好", "兩個都沒", "做不好", "沒辦法同時",
     )
     try:
         result = _call_claude(system, user, max_tokens=300)
