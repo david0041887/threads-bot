@@ -39,6 +39,7 @@ class ScrapedPost:
     text: str
     username: str
     media_id: str = ""
+    time_text: str = ""  # e.g. "1h", "2d", "3w", or ISO datetime
 
     @property
     def id(self) -> str:
@@ -242,14 +243,20 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                         let text = '';
                         let username = '';
                         let mediaId = '';
+                        let timeText = '';
                         for (let i = 0; i < 15; i++) {
                             node = node.parentElement;
                             if (!node) break;
                             const t = (node.innerText || '').trim();
-                            // 嘗試抓 data-id / data-post-id 等屬性
                             const did = node.getAttribute('data-id') || node.getAttribute('data-post-id') || node.getAttribute('data-media-id');
                             if (did && /^\\d{10,}$/.test(did)) mediaId = did;
                             if (!text && t.length > 50) text = t.slice(0, 500);
+                            if (!timeText) {
+                                const timeEl = node.querySelector('time');
+                                if (timeEl) {
+                                    timeText = timeEl.getAttribute('datetime') || timeEl.innerText || '';
+                                }
+                            }
                         }
                         node = el;
                         for (let i = 0; i < 15; i++) {
@@ -261,7 +268,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                                 break;
                             }
                         }
-                        return {text: text, username: username, mediaId: mediaId};
+                        return {text: text, username: username, mediaId: mediaId, timeText: timeText};
                     }""")
 
                     raw_text = (result.get("text") or "").strip()
@@ -291,7 +298,8 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                     if username.lower() == my_username:
                         continue
 
-                    posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username, media_id=media_id))
+                    time_text = (result.get("timeText") or "").strip()
+                    posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username, media_id=media_id, time_text=time_text))
                     if len(posts) >= limit:
                         break
 

@@ -274,6 +274,32 @@ async def proactive_patrol_job(force: bool = False):
 
     random.shuffle(results)
 
+    def _post_age_hours(time_text: str) -> float:
+        """從貼文時間文字估算距今小時數，無法解析回傳 0（視為新）。"""
+        import re as _re_t
+        from datetime import datetime, timezone
+        t = time_text.strip()
+        if not t:
+            return 0.0
+        # ISO datetime（Threads <time datetime="...">）
+        try:
+            dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+            diff = datetime.now(timezone.utc) - dt
+            return diff.total_seconds() / 3600
+        except Exception:
+            pass
+        # 相對時間：1h / 2d / 3w / 1m
+        m = _re_t.match(r"^(\d+)\s*([mhdwMHDW分小時天週周])", t)
+        if m:
+            n, unit = int(m.group(1)), m.group(2).lower()
+            if unit in ("m", "分"):   return n / 60
+            if unit in ("h", "小時"): return float(n)
+            if unit in ("d", "天"):   return n * 24.0
+            if unit in ("w", "週", "周"): return n * 168.0
+        return 0.0
+
+    MAX_POST_AGE_HOURS = 48
+
     reply_tasks = []
     for post in results:
         if len(reply_tasks) >= batch:
@@ -281,6 +307,10 @@ async def proactive_patrol_job(force: bool = False):
         if post.shortcode in processed_proactive_ids:
             continue
         if not post.text or len(post.text) < 20:
+            continue
+        age = _post_age_hours(post.time_text)
+        if age > MAX_POST_AGE_HOURS:
+            logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={age:.1f}h time={post.time_text!r}")
             continue
         reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
         logger.info(f"[海巡] @{post.username} reply_len={len(reply_text)} preview={reply_text[:40]!r}")
