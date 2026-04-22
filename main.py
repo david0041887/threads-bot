@@ -380,8 +380,7 @@ async def approve_draft(job_id: str, choice: str):
         _save_pending_jobs()
         return {"status": "published", "post_id": post_id}
     except Exception as e:
-        job["status"] = "error"
-        notify_error(f"發文失敗: {e}")
+        # 刻意不更改 status，保持 pending，讓用戶可以重試
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         client.close()
@@ -463,6 +462,8 @@ async def telegram_message_handler(request: Request):
                                 client.close()
                         else:
                             send_telegram("❌ 找不到草稿內容，請重新觸發草稿（/admin/trigger-draft）")
+                    elif e.status_code == 500:
+                        send_telegram(f"❌ Threads 伺服器錯誤，草稿仍保留\n請重新回覆「{cmd}」重試")
                     else:
                         send_telegram(f"❌ 發文失敗：{e.detail}")
                 except Exception as e:
