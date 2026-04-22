@@ -436,6 +436,36 @@ def _is_insurance_related(post_text: str) -> bool:
         return False
 
 
+def _reply_passes_quality_gate(reply_text: str) -> bool:
+    """
+    步驟三：語意審查。
+    判斷回覆是否含有排序邏輯或對任何險種的負面描述（不看字眼，看意思）。
+    回傳 True = 通過，False = 丟棄。
+    """
+    system = """你是一個保險內容合規審查員。判斷以下留言是否違反任一規則：
+
+規則一【排序】：是否暗示或明示不同險種有先後順序、優先級、重要性差異？
+例如：「醫療先顧，壽險之後再補」「意外險可以最後考慮」「先把保障做好再談投資」都算違規。
+
+規則二【負面描述】：是否對任何一種保險商品（含投資型保單、終身險、定期險、儲蓄險、意外險等）說它不好、不划算、有缺陷、效率低、費用高、風險大，無論用什麼字眼？
+例如：「投資型保單兩個都做不好」「終身險保費效率低」「保險成本會越扣越多」「純保障更直接」都算違規。
+
+規則三【分離論】：是否說「保險歸保險、投資歸投資」或同等意思的說法？
+
+只輸出一個單字：PASS 或 FAIL，不加任何解釋。"""
+
+    try:
+        result = _call_claude(system, reply_text.strip(), max_tokens=5)
+        answer = result.strip().upper()
+        passes = answer.startswith("PASS")
+        if not passes:
+            logger.info(f"[海巡] 步驟三語意審查 FAIL: {reply_text[:60]!r}")
+        return passes
+    except Exception as e:
+        logger.error(f"[海巡] 步驟三審查失敗，預設丟棄: {e}")
+        return False
+
+
 def generate_proactive_reply(post_text: str, keyword: str) -> str:
     """
     針對他人保險相關貼文生成主動回覆。
@@ -493,23 +523,13 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 貼文內容：
 {post_text}"""
 
-    _RANKING_PHRASES = (
-        "最後補齊", "最後補充", "最後才補", "最後才是", "最後再補", "最後再配", "最後補",
-        "不用優先", "建議最後", "優先順序", "規劃順序", "先後順序", "順序其實", "順序對了",
-        "保費低最後", "相對較低最後", "優先建議", "倒過來", "順序倒",
-        "不用搶先", "彈性補齊", "彈性配置", "可視預算彈性",
-        "意外險相對", "意外保費相對", "意外險保費低", "意外險反而", "意外險最後",
-        "先把", "先補", "排在前面", "排在後面",
-        "通常順序", "順序是", "投資歸投資", "保險歸保險",
-        "都沒做好", "兩個都沒", "做不好", "沒辦法同時",
-    )
     try:
         result = _call_claude(system, user, max_tokens=300)
         cleaned = result.strip().strip('"').strip("'").strip()
         if not cleaned or len(cleaned) < 5:
             return ""
-        if any(p in cleaned for p in _RANKING_PHRASES) or cleaned.count("→") >= 2:
-            logger.info(f"[海巡] 過濾排序語言: {cleaned[:40]!r}")
+        # 步驟三：語意審查（不看字眼，看邏輯）
+        if not _reply_passes_quality_gate(cleaned):
             return ""
         return _apply_compliance(cleaned)
     except Exception as e:
