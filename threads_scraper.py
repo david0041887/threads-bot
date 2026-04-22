@@ -203,7 +203,26 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
             logger.info(f"[海巡] 前往搜尋頁面: {search_url}")
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
             logger.info(f"[海巡] 目前 URL: {page.url}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
+
+            # 嘗試點擊「最新/Recent」頁籤，取得時間排序結果
+            try:
+                recent_tab = await page.query_selector(
+                    'span:text("最新"), span:text("Recent"), '
+                    '[role="tab"]:has-text("最新"), [role="tab"]:has-text("Recent")'
+                )
+                if recent_tab:
+                    await recent_tab.click()
+                    logger.info("[海巡] 已切換至最新排序")
+                    await asyncio.sleep(2)
+                else:
+                    # 嘗試直接用 URL 參數切換
+                    recent_url = f"https://www.threads.com/search?q={encoded}&serp_type=default&filter=recent"
+                    await page.goto(recent_url, wait_until="domcontentloaded", timeout=20000)
+                    logger.info(f"[海巡] 嘗試 recent URL: {recent_url}")
+                    await asyncio.sleep(2)
+            except Exception as e:
+                logger.warning(f"[海巡] 切換最新排序失敗，使用預設排序: {e}")
 
             # 等待貼文連結出現（Threads 可能已不用 article 標籤）
             try:

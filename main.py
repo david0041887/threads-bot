@@ -298,7 +298,7 @@ async def proactive_patrol_job(force: bool = False):
             if unit in ("w", "週", "周"): return n * 168.0
         return 0.0
 
-    MAX_POST_AGE_HOURS = 48
+    MAX_POST_AGE_HOURS = 60 * 24  # 60 天
 
     reply_tasks = []
     for post in results:
