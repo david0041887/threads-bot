@@ -12,10 +12,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def send_telegram(message: str) -> Optional[int]:
+def send_telegram(message: str, chat_id: str = "") -> Optional[int]:
     """發送 Telegram 訊息，回傳 message_id（失敗回傳 None）。"""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
     if not bot_token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未設定")
         return None

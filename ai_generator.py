@@ -584,6 +584,15 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
         cleaned = result.strip().strip('"').strip("'").strip()
         if not cleaned or len(cleaned) < 5:
             return ""
+        # 防線：過濾任何 meta 解釋文字（這類文字不應出現在留言中）
+        _META = (
+            "不適合", "廣告貼文", "與保險無關", "跟保險無關", "和保險無關",
+            "無關", "不相關", "不適合回覆", "此貼文", "這則貼文", "這篇貼文",
+            "記帳", "稅務公司", "不予回覆", "略過", "純稅務", "純投資",
+        )
+        if any(p in cleaned for p in _META):
+            logger.info(f"[海巡] 步驟二輸出 meta 解釋，丟棄: {cleaned[:50]!r}")
+            return ""
         # 步驟三：語意審查（不看字眼，看邏輯）
         if not _reply_passes_quality_gate(cleaned):
             return ""

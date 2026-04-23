@@ -103,6 +103,9 @@ PATROL_SCHEDULE = {
 # 當日已發出的主動回覆數
 daily_proactive_count = {"morning": 0, "noon": 0, "evening": 0, "date": ""}
 
+# 海巡主動停止旗標（send_telegram 可能失敗，用旗標確保暫停生效）
+_patrol_active = True
+
 
 def get_client() -> ThreadsClient:
     return ThreadsClient(
@@ -238,6 +241,10 @@ async def poll_replies_job():
 
 async def proactive_patrol_job(force: bool = False):
     """每 15 分鐘執行一次，用瀏覽器 UI 在串文底下直接回覆。force=True 可跳過時段限制。"""
+    global _patrol_active
+    if not _patrol_active and not force:
+        logger.info("[海巡] 旗標已暫停，跳過本次執行")
+        return
     reset_daily_count()
     session = get_current_session()
     if not session:
@@ -444,7 +451,11 @@ async def telegram_message_handler(request: Request):
     text = msg.get("text", "").strip()
 
     # ── 全域指令（最高優先，不受 reply context 影響）────
+    _tg_chat_id = msg.get("chat", {}).get("id") or os.getenv("TELEGRAM_CHAT_ID", "")
+
     if text == "海巡暫停":
+        global _patrol_active
+        _patrol_active = False
         try:
             scheduler.remove_job("proactive_patrol")
         except Exception:
@@ -453,16 +464,17 @@ async def telegram_message_handler(request: Request):
             scheduler.remove_job("poll_replies")
         except Exception:
             pass
-        send_telegram("⏸ 海巡與留言回覆已暫停")
+        send_telegram("⏸ 海巡已暫停", chat_id=str(_tg_chat_id))
         return JSONResponse({"ok": True})
 
     if text == "海巡繼續":
+        _patrol_active = True
         try:
             scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
             scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
-            send_telegram("▶️ 海巡與留言回覆已恢復（每 15 分鐘海巡一次）")
+            send_telegram("▶️ 海巡已恢復", chat_id=str(_tg_chat_id))
         except Exception as e:
-            send_telegram(f"❌ 恢復失敗: {e}")
+            send_telegram(f"❌ 恢復失敗: {e}", chat_id=str(_tg_chat_id))
         return JSONResponse({"ok": True})
 
     if text == "觸發草稿":
