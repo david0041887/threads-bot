@@ -68,9 +68,14 @@ def _bump_count(session: str) -> None:
     state.set_kv(_COUNTS_KEY, c)
 
 
+def _current_access_token() -> str:
+    """Threads access token — prefer state.kv (survives redeploys) over env var."""
+    return state.get_kv("threads_access_token") or os.environ["THREADS_ACCESS_TOKEN"]
+
+
 def get_client() -> ThreadsClient:
     return ThreadsClient(
-        access_token=os.environ["THREADS_ACCESS_TOKEN"],
+        access_token=_current_access_token(),
         user_id=os.environ["THREADS_USER_ID"],
     )
 
@@ -141,11 +146,19 @@ app = FastAPI(title="Threads AI Bot", lifespan=lifespan)
 
 async def daily_draft_job():
     logger.info("執行每日草稿任務")
+    # 今日已產過就跳過，避免手動 + cron 同日重複觸發
+    from datetime import datetime
+    import pytz
+    today = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d")
+    if state.get_kv("last_draft_date") == today:
+        logger.info(f"daily_draft_job: 今日 ({today}) 已產過草稿，跳過")
+        return
     try:
         articles = generate_daily_topics()
         drafts = generate_post_drafts(articles, count=3)
         job_id = str(uuid.uuid4())[:8]
         state.save_pending_job(job_id, {"drafts": drafts})
+        state.set_kv("last_draft_date", today)
         notify_drafts_for_approval(drafts, job_id=job_id)
     except Exception as e:
         logger.error(f"每日草稿任務失敗: {e}")
@@ -164,11 +177,16 @@ async def poll_replies_job():
             for reply in replies:
                 if state.is_processed("reply", reply.id):
                     continue
-                # 若我們帳號已回覆過此留言，直接標記處理並跳過
+                # 走過我們自己 approve 流程的留言，不需再打 API 檢查
+                if state.is_processed("self_replied", reply.id):
+                    state.mark_processed("reply", reply.id)
+                    continue
+                # 否則用 API 查是否已在 Threads UI 上回過（邊界情況）
                 if my_username:
                     sub_replies = client.get_sub_replies(reply.id)
                     if any(sr.username.lower() == my_username for sr in sub_replies):
                         state.mark_processed("reply", reply.id)
+                        state.mark_processed("self_replied", reply.id)
                         logger.info(f"已跳過已回覆留言 @{reply.username}: {reply.text[:30]}")
                         continue
                 state.mark_processed("reply", reply.id)
@@ -284,8 +302,12 @@ async def refresh_token_job():
         result = client.refresh_long_lived_token(
             app_secret=os.environ["THREADS_APP_SECRET"]
         )
-        os.environ["THREADS_ACCESS_TOKEN"] = result["access_token"]
+        new_token = result["access_token"]
+        # 同時寫 state.kv（跨部署保留）+ os.environ（當前 process 立即生效）
+        state.set_kv("threads_access_token", new_token)
+        os.environ["THREADS_ACCESS_TOKEN"] = new_token
         client.close()
+        logger.info("Token 刷新成功，已寫入 state.kv")
     except Exception as e:
         notify_error(f"Token 刷新失敗: {e}")
 
@@ -304,6 +326,8 @@ async def approve_reply(reply_job_id: str, action: str):
     try:
         new_reply_id = client.reply_to_comment(reply_id=job["reply_id"], text=job["reply_text"])
         state.update_reply(reply_job_id, "replied", {"new_reply_id": new_reply_id})
+        # 記住我們已回過此留言 — 下次 poll_replies_job 就不用再打 get_sub_replies
+        state.mark_processed("self_replied", job["reply_id"])
         return {"status": "replied", "reply_id": new_reply_id}
     except Exception as e:
         state.update_reply(reply_job_id, "error", {"error": str(e)})

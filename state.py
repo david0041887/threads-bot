@@ -226,3 +226,12 @@ def cleanup_old_jobs(hours: int = 24) -> int:
     if total:
         logger.info(f"state.py: cleaned up {total} old rows (> {hours}h)")
     return total
+
+
+def cleanup_old_processed_ids(days: int = 90) -> int:
+    cutoff = int(time.time()) - days * 86400
+    with _conn() as c:
+        cur = c.execute("DELETE FROM processed_ids WHERE created_at < ?", (cutoff,))
+    if cur.rowcount:
+        logger.info(f"state.py: cleaned up {cur.rowcount} processed_ids (> {days}d)")
+    return cur.rowcount

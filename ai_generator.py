@@ -7,6 +7,7 @@ Claude AI 內容生成 — 發文草稿 & 留言回覆 & 自動主題產生
 import os
 import json
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -14,7 +15,24 @@ import httpx
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-sonnet-4-6"
+MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-6")
+COMPLIANCE_MODEL = os.getenv("COMPLIANCE_MODEL", "claude-haiku-4-5-20251001")
+
+
+def _retry(fn, attempts: int = 3, base_delay: float = 1.0):
+    """Exponential backoff retry on httpx errors. Blocks event loop briefly."""
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            last_exc = e
+            if i == attempts - 1:
+                break
+            delay = base_delay * (2 ** i)
+            logger.warning(f"[retry] 第 {i+1} 次失敗 ({type(e).__name__}): {e}; {delay}s 後重試")
+            time.sleep(delay)
+    raise last_exc
 
 
 ACCOUNT_PERSONA = os.getenv("ACCOUNT_PERSONA", """
@@ -145,21 +163,23 @@ _COMPLIANCE_RULES = """
 """
 
 
-def _call_claude(system: str, user: str, max_tokens: int = 1000) -> str:
+def _call_claude(system: str, user: str, max_tokens: int = 1000, model: Optional[str] = None) -> str:
     headers = {
         "x-api-key": os.environ["ANTHROPIC_API_KEY"],
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
     body = {
-        "model": MODEL,
+        "model": model or MODEL,
         "max_tokens": max_tokens,
         "system": system,
         "messages": [{"role": "user", "content": user}],
     }
-    resp = httpx.post(ANTHROPIC_API, headers=headers, json=body, timeout=60)
-    resp.raise_for_status()
-    return resp.json()["content"][0]["text"].strip()
+    def _once():
+        resp = httpx.post(ANTHROPIC_API, headers=headers, json=body, timeout=60)
+        resp.raise_for_status()
+        return resp.json()["content"][0]["text"].strip()
+    return _retry(_once)
 
 
 def check_compliance(text: str) -> dict:
@@ -185,7 +205,8 @@ def check_compliance(text: str) -> dict:
 }}"""
 
     try:
-        raw = _call_claude(system, user, max_tokens=1200)
+        # 合規審查走 Haiku（便宜 ~5x），本身是規則檢查不需要創造力
+        raw = _call_claude(system, user, max_tokens=1200, model=COMPLIANCE_MODEL)
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
         if result.get("issues"):

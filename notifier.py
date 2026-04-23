@@ -4,6 +4,7 @@ notifier.py
 """
 
 import os
+import time
 import logging
 from typing import Optional
 
@@ -20,17 +21,21 @@ def send_telegram(message: str) -> bool:
     if not bot_token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未設定")
         return False
-    try:
-        resp = httpx.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={"chat_id": chat_id, "text": message},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return True
-    except Exception as e:
-        logger.error(f"Telegram 發送失敗: {e}")
-        return False
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
+    for i in range(3):
+        try:
+            resp = httpx.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+            return True
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            if i == 2:
+                logger.error(f"Telegram 發送失敗（3 次皆失敗）: {e}")
+                return False
+            delay = 1.0 * (2 ** i)
+            logger.warning(f"Telegram 發送第 {i+1} 次失敗，{delay}s 後重試: {e}")
+            time.sleep(delay)
+    return False
 
 
 def notify_drafts_for_approval(drafts: list[dict], job_id: str, channel: Optional[str] = None) -> bool:
