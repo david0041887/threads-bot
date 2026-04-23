@@ -27,6 +27,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+# 避免 httpx INFO log 把 URL + access_token 印到 Railway log 裡
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 try:
@@ -120,12 +123,13 @@ async def lifespan(app: FastAPI):
     state.init_db()
     _ensure_chromium()
     scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), id="daily_draft", replace_existing=True)
-    # poll_replies 暫停（待確認 UI 回覆正常後啟用）
-    # scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-    # 海巡暫停（UI 回覆測試中）
-    # scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
+    # 依 state 裡的 flag 決定海巡 / 留言輪詢是否啟動（跨部署記住）
+    if state.get_kv("schedulers_enabled", False):
+        scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
+        scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
+        logger.info("[持久化] schedulers_enabled=True，海巡 / 留言輪詢已自動啟動")
     scheduler.start()
     logger.info("Scheduler 啟動")
     yield
@@ -345,22 +349,21 @@ async def telegram_message_handler(request: Request):
 
     # ── 海巡控制 ──────────────────────────────────────
     if text == "海巡暫停":
-        try:
-            scheduler.remove_job("proactive_patrol")
-        except Exception:
-            pass
-        try:
-            scheduler.remove_job("poll_replies")
-        except Exception:
-            pass
-        send_telegram("⏸ 海巡與留言回覆已暫停")
+        for jid in ("proactive_patrol", "poll_replies"):
+            try:
+                scheduler.remove_job(jid)
+            except Exception:
+                pass
+        state.set_kv("schedulers_enabled", False)
+        send_telegram("⏸ 海巡與留言回覆已暫停（狀態已保存，重啟仍生效）")
         return JSONResponse({"ok": True})
 
     if text == "海巡繼續":
         try:
             scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
             scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
-            send_telegram("▶️ 海巡與留言回覆已恢復（每 15 分鐘海巡一次）")
+            state.set_kv("schedulers_enabled", True)
+            send_telegram("▶️ 海巡與留言回覆已恢復（狀態已保存，跨部署生效）")
         except Exception as e:
             send_telegram(f"❌ 恢復失敗: {e}")
         return JSONResponse({"ok": True})
