@@ -447,8 +447,10 @@ def _parse_draft_from_tg_msg(tg_text: str, choice: int) -> str:
 async def telegram_message_handler(request: Request):
     import asyncio, re as _re
     payload = await request.json()
-    msg = payload.get("message", {})
+    # 同時支援私訊/群組（message）和頻道（channel_post）
+    msg = payload.get("message") or payload.get("channel_post") or {}
     text = msg.get("text", "").strip()
+    logger.info(f"[TG webhook] 收到: {text!r} chat={msg.get('chat',{}).get('id')}")
 
     # ── 全域指令（最高優先，不受 reply context 影響）────
     _tg_chat_id = msg.get("chat", {}).get("id") or os.getenv("TELEGRAM_CHAT_ID", "")
@@ -475,6 +477,11 @@ async def telegram_message_handler(request: Request):
             send_telegram("▶️ 海巡已恢復", chat_id=str(_tg_chat_id))
         except Exception as e:
             send_telegram(f"❌ 恢復失敗: {e}", chat_id=str(_tg_chat_id))
+        return JSONResponse({"ok": True})
+
+    if text in ("ping", "狀態", "測試"):
+        patrol_status = "▶️ 運行中" if _patrol_active else "⏸ 已暫停"
+        send_telegram(f"✅ Bot 正常運作\n海巡狀態：{patrol_status}", chat_id=str(_tg_chat_id))
         return JSONResponse({"ok": True})
 
     if text == "觸發草稿":
