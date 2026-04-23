@@ -130,6 +130,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), id="daily_draft", replace_existing=True)
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
+    scheduler.add_job(lambda: state.cleanup_old_processed_ids(days=90), CronTrigger(day_of_week="sun", hour=4, minute=30, timezone="Asia/Taipei"), id="processed_ids_cleanup", replace_existing=True)
     # 依 state 裡的 flag 決定海巡 / 留言輪詢是否啟動（跨部署記住）
     if state.get_kv("schedulers_enabled", False):
         scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
