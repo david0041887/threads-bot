@@ -281,29 +281,53 @@ async def proactive_patrol_job(force: bool = False):
 
     random.shuffle(results)
 
-    def _post_age_hours(time_text: str) -> float:
-        """從貼文時間文字估算距今小時數，無法解析回傳 0（視為新）。"""
+    def _post_age_hours(time_text: str, post_body: str = "") -> float:
+        """從貼文時間文字估算距今小時數。
+        time_text 空時嘗試從貼文本文抓日期，仍找不到回傳 None（未知）。"""
         import re as _re_t
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone, date as _date
+        now = datetime.now(timezone.utc)
+
         t = time_text.strip()
-        if not t:
-            return 0.0
-        # ISO datetime（Threads <time datetime="...">）
-        try:
-            dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
-            diff = datetime.now(timezone.utc) - dt
-            return diff.total_seconds() / 3600
-        except Exception:
-            pass
-        # 相對時間：1h / 2d / 3w / 1m
-        m = _re_t.match(r"^(\d+)\s*([mhdwMHDW分小時天週周])", t)
-        if m:
-            n, unit = int(m.group(1)), m.group(2).lower()
-            if unit in ("m", "分"):   return n / 60
-            if unit in ("h", "小時"): return float(n)
-            if unit in ("d", "天"):   return n * 24.0
-            if unit in ("w", "週", "周"): return n * 168.0
-        return 0.0
+        if t:
+            # ISO datetime
+            try:
+                dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+                return (now - dt).total_seconds() / 3600
+            except Exception:
+                pass
+            # 相對時間：1h / 2d / 3w
+            m = _re_t.match(r"^(\d+)\s*([mhdwMHDW分小時天週周])", t)
+            if m:
+                n, unit = int(m.group(1)), m.group(2).lower()
+                if unit in ("m", "分"):      return n / 60
+                if unit in ("h", "小時"):   return float(n)
+                if unit in ("d", "天"):     return n * 24.0
+                if unit in ("w", "週", "周"): return n * 168.0
+
+        # 從貼文本文找日期（MM/DD/YY 或 YYYY/MM/DD 或 YYYY年MM月DD日）
+        patterns = [
+            r"(\d{1,2})/(\d{1,2})/(\d{2,4})",  # MM/DD/YY or MM/DD/YYYY
+            r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})",  # YYYY-MM-DD
+            r"(\d{4})年(\d{1,2})月(\d{1,2})?日?",  # YYYY年MM月DD日
+        ]
+        today = now.date()
+        for pat in patterns:
+            for m in _re_t.finditer(pat, post_body):
+                try:
+                    g = m.groups()
+                    if len(g[0]) == 4:  # YYYY first
+                        y, mo, d = int(g[0]), int(g[1]), int(g[2] or 1)
+                    else:
+                        mo, d, y = int(g[0]), int(g[1]), int(g[2])
+                        y = 2000 + y if y < 100 else y
+                    post_date = _date(y, mo, d)
+                    days_ago = (today - post_date).days
+                    if days_ago >= 0:
+                        return days_ago * 24.0
+                except Exception:
+                    continue
+        return None  # 無法判斷年齡
 
     MAX_POST_AGE_HOURS = 60 * 24  # 60 天
 
@@ -315,9 +339,9 @@ async def proactive_patrol_job(force: bool = False):
             continue
         if not post.text or len(post.text) < 20:
             continue
-        age = _post_age_hours(post.time_text)
-        if age > MAX_POST_AGE_HOURS:
-            logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={age:.1f}h time={post.time_text!r}")
+        age = _post_age_hours(post.time_text, post.text)
+        if age is not None and age > MAX_POST_AGE_HOURS:
+            logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={age:.0f}h")
             continue
         reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
         logger.info(f"[海巡] @{post.username} reply_len={len(reply_text)} preview={reply_text[:40]!r}")

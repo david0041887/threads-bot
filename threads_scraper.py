@@ -205,24 +205,35 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
             logger.info(f"[海巡] 目前 URL: {page.url}")
             await asyncio.sleep(2)
 
-            # 嘗試點擊「最新/Recent」頁籤，取得時間排序結果
+            # 嘗試切換至「最新」排序（多種方式嘗試）
             try:
-                recent_tab = await page.query_selector(
-                    'span:text("最新"), span:text("Recent"), '
-                    '[role="tab"]:has-text("最新"), [role="tab"]:has-text("Recent")'
-                )
-                if recent_tab:
-                    await recent_tab.click()
-                    logger.info("[海巡] 已切換至最新排序")
-                    await asyncio.sleep(2)
-                else:
-                    # 嘗試直接用 URL 參數切換
-                    recent_url = f"https://www.threads.com/search?q={encoded}&serp_type=default&filter=recent"
-                    await page.goto(recent_url, wait_until="domcontentloaded", timeout=20000)
-                    logger.info(f"[海巡] 嘗試 recent URL: {recent_url}")
-                    await asyncio.sleep(2)
+                switched = False
+                # 方法一：找含「最新」「Recent」「Latest」文字的 tab
+                for selector in [
+                    'div[role="tab"]:has-text("最新")',
+                    'div[role="tab"]:has-text("Recent")',
+                    'div[role="tab"]:has-text("Latest")',
+                    '[role="tab"] >> text=/最新|Recent|Latest/i',
+                ]:
+                    el = await page.query_selector(selector)
+                    if el:
+                        await el.click()
+                        await asyncio.sleep(2)
+                        logger.info(f"[海巡] 已切換至最新排序（{selector}）")
+                        switched = True
+                        break
+                # 方法二：點第二個 tab（通常是 Recent）
+                if not switched:
+                    tabs = await page.query_selector_all('[role="tab"]')
+                    if len(tabs) >= 2:
+                        await tabs[1].click()
+                        await asyncio.sleep(2)
+                        logger.info("[海巡] 已點擊第二個 tab 切換最新排序")
+                        switched = True
+                if not switched:
+                    logger.warning("[海巡] 找不到最新 tab，使用預設排序")
             except Exception as e:
-                logger.warning(f"[海巡] 切換最新排序失敗，使用預設排序: {e}")
+                logger.warning(f"[海巡] 切換最新排序失敗: {e}")
 
             # 等待貼文連結出現（Threads 可能已不用 article 標籤）
             try:
