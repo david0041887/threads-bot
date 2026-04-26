@@ -254,11 +254,11 @@ async def proactive_patrol_job(force: bool = False):
 
     quota = PATROL_SCHEDULE[session]["count"]
     used = daily_proactive_count[session]
-    if used >= quota:
+    if used >= quota and not force:
         logger.info(f"[海巡] {session} 時段配額已用完 ({used}/{quota})")
         return
 
-    batch = min(2, quota - used)
+    batch = 2 if force else min(2, quota - used)
     keyword = random.choice(SEARCH_KEYWORDS)
     logger.info(f"[海巡] 搜尋關鍵字：{keyword}，本批次：{batch} 則")
 
@@ -363,7 +363,8 @@ async def proactive_patrol_job(force: bool = False):
     try:
         result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks)
         for sc in result.get("replied", []):
-            daily_proactive_count[session] += 1
+            if not force:
+                daily_proactive_count[session] += 1
             task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
             logger.info(f"[海巡] UI 回覆成功 @{task.get('username')} shortcode={sc}")
             send_telegram(
@@ -506,6 +507,12 @@ async def telegram_message_handler(request: Request):
     if text in ("ping", "狀態", "測試"):
         patrol_status = "▶️ 運行中" if _patrol_active else "⏸ 已暫停"
         send_telegram(f"✅ Bot 正常運作\n海巡狀態：{patrol_status}", chat_id=str(_tg_chat_id))
+        return JSONResponse({"ok": True})
+
+    if text in ("海巡測試", "手動海巡"):
+        import asyncio
+        send_telegram("🔍 手動海巡啟動，不列入時段配額，結果將通知你", chat_id=str(_tg_chat_id))
+        asyncio.create_task(proactive_patrol_job(force=True))
         return JSONResponse({"ok": True})
 
     if text == "觸發草稿":
