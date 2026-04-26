@@ -389,12 +389,12 @@ async def telegram_message_handler(request: Request):
     if text in ("ping", "狀態", "測試"):
         enabled = state.get_kv("schedulers_enabled", False)
         patrol_status = "▶️ 運行中" if enabled else "⏸ 已暫停"
-        send_telegram(f"✅ Bot 正常運作\n海巡狀態：{patrol_status}", chat_id=_tg_chat_id)
+        send_telegram(f"✅ Bot 正常運作\n海巡狀態：{patrol_status}")
         return JSONResponse({"ok": True})
 
     # ── 手動海巡（不列入配額）─────────────────────────
     if text in ("海巡測試", "手動海巡"):
-        send_telegram("🔍 手動海巡啟動，不列入時段配額，結果將通知你", chat_id=_tg_chat_id)
+        send_telegram("🔍 手動海巡啟動，不列入時段配額，結果將通知你")
         asyncio.create_task(proactive_patrol_job(force=True))
         return JSONResponse({"ok": True})
 
