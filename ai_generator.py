@@ -333,41 +333,94 @@ def generate_reply(
     return _apply_compliance(reply)
 
 
+def _is_insurance_related(post_text: str) -> bool:
+    """步驟一：判斷貼文是否與保險有任何關聯（寬鬆過濾，只擋完全無關）。"""
+    system = """判斷這篇貼文是否跟「保險」有任何關聯，只輸出 YES 或 NO。
+
+YES：貼文有任何保險相關字眼、概念、或情境（商業保險、健保、業務員故事、理賠、保費都算）
+NO：完全與保險無關——例如純美食、純旅遊、純股票投資、純政治、純日常
+
+只要有一點保險角度就回 YES。確定完全無關才回 NO。
+只輸出 YES 或 NO，不加任何解釋。"""
+    try:
+        result = _call_claude(system, post_text.strip(), max_tokens=5)
+        is_related = result.strip().upper().startswith("YES")
+        logger.info(f"[海巡] 步驟一={'通過' if is_related else '跳過'}: {post_text[:40]!r}")
+        return is_related
+    except Exception as e:
+        logger.error(f"[海巡] 步驟一判斷失敗: {e}")
+        return False
+
+
+def _reply_passes_quality_gate(reply_text: str) -> bool:
+    """步驟三：語意審查。PASS = 合格，FAIL = 丟棄。"""
+    system = """你是一個保險留言合規審查員。判斷以下留言是否違反任一規則：
+
+規則一【排序】：是否暗示不同險種有先後順序或重要性差異？
+規則二【負面描述】：是否對任何保險商品說它不好、不划算、效率低？
+規則三【分離論】：是否說「保險歸保險、投資歸投資」或同等意思？
+規則四【meta評斷】：這段文字的重點是「評論這篇貼文的性質」（如判斷它是否適合回覆、是否與保險有關）而非「提供保險知識」？不看字眼，看意思。例如：「這篇在招募」「此文屬稅務範疇」「不適合介入」都算違規。
+規則五【招攬轉介】：是否叫讀者去找業務員、諮詢保險公司？例如：「歡迎諮詢專業業務員」「建議找專業人士評估」都算違規。
+
+只輸出一個單字：PASS 或 FAIL，不加任何解釋。"""
+    try:
+        result = _call_claude(system, reply_text.strip(), max_tokens=5)
+        passes = result.strip().upper().startswith("PASS")
+        if not passes:
+            logger.info(f"[海巡] 步驟三 FAIL: {reply_text[:60]!r}")
+        return passes
+    except Exception as e:
+        logger.error(f"[海巡] 步驟三審查失敗，預設丟棄: {e}")
+        return False
+
+
 def generate_proactive_reply(post_text: str, keyword: str) -> str:
     """
-    針對他人保險相關貼文生成主動回覆。
-    回傳回覆文字，若內容不適合回覆則回傳空字串。
+    針對他人保險相關貼文生成主動回覆。三步驟過濾確保不發出 meta 解釋文字。
+    步驟一：有無保險角度（NO → 靜默）
+    步驟二：生成回覆，無內容輸出 <<SKIP>>
+    步驟三：語意品質審查
     """
+    # 步驟一
+    if not _is_insurance_related(post_text):
+        return ""
+
+    # 步驟二
     system = f"""{ACCOUNT_PERSONA}
 
-你正在主動回覆 Threads 上與保險相關的公開貼文。
+你正在主動回覆 Threads 上的公開貼文，任務是補充有用的保險知識觀點。
 
 嚴格規則：
-- 聚焦原 PO 的情境、需求或問題，給出有觀點、有幫助的補充
 - 語氣嚴格比照 persona「語氣校準」與「海巡回覆範例」，自然但有專業底氣
 - 不提具體保險公司或商品名稱
-- 不招攬，不說「我可以幫你規劃」「歡迎聯絡我」等直接招攬語
+- 不招攬：不說「我可以幫你規劃」「歡迎聯絡我」「歡迎諮詢」「找業務員」等
 - 不超過 100 字
-- 若貼文內容不適合回覆（廣告、與保險無關、已有完整正確答案），輸出空字串
-- 直接輸出回覆文字或空字串，不加任何說明
 - 不要在文字中加 @username 或任何 @tag
-- 【年期】若涉及「定期 vs 終身」的年期選擇，一律站在定期優先立場；嚴禁讚美終身年期
-"""
+- 你是在留言給貼文的作者或讀者，不要假扮貼文中的任何角色
+- 【年期】若涉及「定期 vs 終身」，一律站在定期優先立場
+
+【輸出規則——最重要】
+你只有兩種輸出，選一種：
+1. 有保險知識可補充 → 直接輸出留言文字
+2. 沒有有價值的東西可補充 → 輸出 <<SKIP>>
+
+不管什麼理由決定不回，一律輸出 <<SKIP>>，不要說任何解釋。"""
 
     user = f"""搜尋關鍵字：{keyword}
 
-他人的 Threads 貼文內容：
-{post_text}
-
-請判斷是否適合回覆，並生成補充知識的回覆（或空字串）："""
+貼文內容：
+{post_text}"""
 
     try:
-        result = _call_claude(system, user, max_tokens=300)
+        result = _call_claude(system, user, max_tokens=200)
         cleaned = result.strip().strip('"').strip("'").strip()
-        if not cleaned or cleaned in ("空字串", "不適合回覆") or len(cleaned) < 5:
+        if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 5:
+            logger.info(f"[海巡] 步驟二跳過: {cleaned[:40]!r}")
             return ""
-        result = cleaned
-        return _apply_compliance(result.strip())
+        # 步驟三
+        if not _reply_passes_quality_gate(cleaned):
+            return ""
+        return _apply_compliance(cleaned)
     except Exception as e:
         logger.error(f"主動回覆生成失敗: {e}")
         return ""

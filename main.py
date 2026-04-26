@@ -225,16 +225,18 @@ async def proactive_patrol_job(force: bool = False):
 
     quota = PATROL_SCHEDULE[session]["count"]
     used = _get_counts().get(session, 0)
-    if used >= quota:
+    if used >= quota and not force:
         logger.info(f"[海巡] {session} 時段配額已用完 ({used}/{quota})")
         return
 
-    batch = min(2, quota - used)
+    batch = 2 if force else min(2, quota - used)
     keyword = random.choice(SEARCH_KEYWORDS)
     logger.info(f"[海巡] 搜尋關鍵字：{keyword}，本批次：{batch} 則")
 
     if not PLAYWRIGHT_AVAILABLE:
         logger.warning("[海巡] Playwright 不可用，跳過本次海巡")
+        if force:
+            send_telegram("❌ 海巡失敗：Playwright 不可用")
         return
 
     # Phase 1：一個 browser session 完成搜尋 + Claude 生成 + UI 回覆
@@ -274,13 +276,16 @@ async def proactive_patrol_job(force: bool = False):
 
     if not reply_tasks:
         logger.info("[海巡] 無合適貼文可回覆")
+        if force:
+            send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇，無合適內容可回覆")
         return
 
     # Phase 2：用新的 browser session 做 UI 回覆（帶 reply_tasks）
     try:
         result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks)
         for sc in result.get("replied", []):
-            _bump_count(session)
+            if not force:
+                _bump_count(session)
             task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
             logger.info(f"[海巡] UI 回覆成功 @{task.get('username')} shortcode={sc}")
             send_telegram(
@@ -293,8 +298,13 @@ async def proactive_patrol_job(force: bool = False):
         for sc in result.get("failed", []):
             task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
             logger.warning(f"[海巡] UI 回覆失敗 @{task.get('username')} shortcode={sc}")
+        if force:
+            replied_n = len(result.get("replied", []))
+            send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 發出 {replied_n} 則")
     except Exception as e:
         logger.error(f"[海巡] search_and_reply 失敗: {e}")
+        if force:
+            send_telegram(f"❌ 海巡執行失敗：{e}")
 
 
 async def refresh_token_job():
@@ -370,7 +380,23 @@ async def approve_draft(job_id: str, choice: str):
 async def telegram_message_handler(request: Request):
     import asyncio, re as _re
     payload = await request.json()
-    text = payload.get("message", {}).get("text", "").strip()
+    msg = payload.get("message") or payload.get("channel_post") or {}
+    text = msg.get("text", "").strip()
+    _tg_chat_id = str(msg.get("chat", {}).get("id") or os.getenv("TELEGRAM_CHAT_ID", ""))
+    logger.info(f"[TG webhook] 收到: {text!r} chat={_tg_chat_id}")
+
+    # ── 狀態查詢 ───────────────────────────────────────
+    if text in ("ping", "狀態", "測試"):
+        enabled = state.get_kv("schedulers_enabled", False)
+        patrol_status = "▶️ 運行中" if enabled else "⏸ 已暫停"
+        send_telegram(f"✅ Bot 正常運作\n海巡狀態：{patrol_status}", chat_id=_tg_chat_id)
+        return JSONResponse({"ok": True})
+
+    # ── 手動海巡（不列入配額）─────────────────────────
+    if text in ("海巡測試", "手動海巡"):
+        send_telegram("🔍 手動海巡啟動，不列入時段配額，結果將通知你", chat_id=_tg_chat_id)
+        asyncio.create_task(proactive_patrol_job(force=True))
+        return JSONResponse({"ok": True})
 
     # ── 海巡控制 ──────────────────────────────────────
     if text == "海巡暫停":
@@ -465,6 +491,14 @@ async def telegram_message_handler(request: Request):
         return JSONResponse({"ok": True})
 
     return JSONResponse({"ok": True})
+
+
+@app.get("/admin/test-tg")
+async def test_tg_send():
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    msg_id = send_telegram("🔧 TG 連線測試 OK")
+    return {"token_prefix": token[:8] if token else "MISSING", "chat_id": chat_id, "message_id": msg_id, "ok": msg_id is not None}
 
 
 @app.post("/admin/trigger-draft")
