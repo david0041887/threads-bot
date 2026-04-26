@@ -264,6 +264,8 @@ async def proactive_patrol_job(force: bool = False):
 
     if not PLAYWRIGHT_AVAILABLE:
         logger.warning("[海巡] Playwright 不可用，跳過本次海巡")
+        if force:
+            send_telegram("❌ 海巡失敗：Playwright 不可用")
         return
 
     # Phase 1：一個 browser session 完成搜尋 + Claude 生成 + UI 回覆
@@ -277,6 +279,8 @@ async def proactive_patrol_job(force: bool = False):
 
     if not results:
         logger.info(f"[海巡] 關鍵字「{keyword}」無搜尋結果")
+        if force:
+            send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜尋無結果")
         return
 
     random.shuffle(results)
@@ -377,8 +381,17 @@ async def proactive_patrol_job(force: bool = False):
         for sc in result.get("failed", []):
             task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
             logger.warning(f"[海巡] UI 回覆失敗 @{task.get('username')} shortcode={sc}")
+        if force:
+            replied_n = len(result.get("replied", []))
+            skipped_n = len(reply_tasks) - replied_n - len(result.get("failed", []))
+            send_telegram(
+                f"🔍 海巡完成（關鍵字：{keyword}）\n"
+                f"搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 成功發出 {replied_n} 則"
+            )
     except Exception as e:
         logger.error(f"[海巡] search_and_reply 失敗: {e}")
+        if force:
+            send_telegram(f"❌ 海巡執行失敗：{e}")
 
 
 async def refresh_token_job():
