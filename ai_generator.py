@@ -430,23 +430,18 @@ def _is_insurance_related(post_text: str) -> bool:
     步驟一：判斷貼文是否與保險知識相關。
     只回傳 YES 或 NO，不生成任何回覆內容。
     """
-    system = """將這篇貼文分類到以下其中一個類型，只輸出一個英文字母。
+    system = """判斷這篇貼文是否跟「保險」有任何關聯，只輸出 YES 或 NO。
 
-A = 一般人（非業務員、非業者）正在討論商業保險的觀念、原理、結構——讀者能從中學到保險知識
-B = 業務員/保險從業者發文：行銷、招攬、服務故事、感人案例、釣留言、職涯、業績、業界形象
-C = 政府保險/政策/制度：健保、勞保、國民年金、補充保費法規、任何政策或法令
-D = 投資/財務/退休：ETF、基金、股票、月配息、退休規劃、節稅、財富自由（保險不是核心）
-E = 個人生活故事/日常/工作/轉職（保險只是背景提及或完全無關）
-F = 其他、廣告業配、求推薦業務員、具體理賠流程詢問、任何不確定的貼文
+YES：貼文有任何保險相關字眼、概念、或情境（不管是商業保險、健保、業務員故事、理賠、保費都算）
+NO：完全與保險無關——例如純美食、純旅遊、純股票投資、純政治、純日常
 
-只有 A 才值得回覆。遇到任何疑問，歸 F。
-只輸出一個字母，不加任何說明。"""
+只要有一點保險角度就回 YES。確定完全無關才回 NO。
+只輸出 YES 或 NO，不加任何解釋。"""
 
     try:
-        result = _call_claude(system, post_text.strip(), max_tokens=3)
-        category = result.strip().upper()[:1]
-        is_related = (category == "A")
-        logger.info(f"[海巡] 步驟一分類={category!r} {'→通過' if is_related else '→跳過'}: {post_text[:40]!r}")
+        result = _call_claude(system, post_text.strip(), max_tokens=5)
+        is_related = result.strip().upper().startswith("YES")
+        logger.info(f"[海巡] 步驟一={'通過' if is_related else '跳過'}: {post_text[:40]!r}")
         return is_related
     except Exception as e:
         logger.error(f"[海巡] 步驟一判斷失敗: {e}")
@@ -574,10 +569,14 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 - 「意外險定義嚴格很多意外不算」「長照門檻很高很難領到」
 ✅ 只說明「它能做什麼」，不評價「好不好」「划不划算」
 
-【輸出格式】
-你的輸出只能是留言本身的文字。
-絕對禁止：對貼文作任何判斷或評價（例如「這篇在招募」「這篇是稅務內容」「這篇不適合」「這篇與保險無關」）。
-如果你發現貼文其實不適合回覆，輸出完全空白，不要解釋原因。"""
+【輸出規則——最重要】
+你有兩種輸出，只能選一種：
+
+1. 如果你能為這篇貼文的讀者補充一個有用的保險知識點：直接輸出留言文字
+2. 如果你沒有什麼有價值的東西可以補充：輸出 <<SKIP>>
+
+不管是「貼文不適合」「跟保險無關」「沒有問題可回答」還是任何其他理由，
+只要決定不回，一律輸出 <<SKIP>>，其他什麼都不要說。"""
 
     user = f"""搜尋關鍵字：{keyword}
 
@@ -587,31 +586,11 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
     try:
         result = _call_claude(system, user, max_tokens=180)
         cleaned = result.strip().strip('"').strip("'").strip()
-        if not cleaned or len(cleaned) < 5:
+        # <<SKIP>> = Claude 決定不回，任何位置出現都當作跳過
+        if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 5:
+            logger.info(f"[海巡] 步驟二跳過（無內容或 SKIP）: {cleaned[:40]!r}")
             return ""
-        # 防線：過濾任何 meta 解釋文字（這類文字不應出現在留言中）
-        _META = (
-            "不適合", "廣告貼文", "與保險無關", "跟保險無關", "和保險無關",
-            "無關", "不相關", "不適合回覆", "此貼文", "這則貼文", "這篇貼文",
-            "記帳", "稅務公司", "不予回覆", "略過", "純稅務", "純投資",
-            "自我介紹", "業績分享", "自我行銷", "招攬", "同業",
-            "屬於稅務", "屬於財務", "屬於餐飲", "沒有保險", "不涉及保險",
-            "介入回覆", "搜尋關鍵字", "幾乎無關", "比較無關",
-            # 招募類 meta 文字
-            "在招募", "招募", "不是在討論", "不是討論保險",
-            # 行銷/品牌類
-            "行銷文", "業務行銷", "品牌貼文", "行銷貼文",
-            # 帶「這篇」開頭的評斷句
-            "這篇是", "這篇在", "這篇屬於", "這篇主要", "這篇討論",
-            # 稅務/財務類
-            "稅務內容", "會計內容", "財務內容",
-            # 退休/投資類
-            "退休規劃", "月配息", "財富自由",
-        )
-        if any(p in cleaned for p in _META):
-            logger.info(f"[海巡] 步驟二輸出 meta 解釋，丟棄: {cleaned[:50]!r}")
-            return ""
-        # 步驟三：語意審查（不看字眼，看邏輯）
+        # 步驟三：語意審查（排序/負面描述/meta評斷/招攬）
         if not _reply_passes_quality_gate(cleaned):
             return ""
         return _apply_compliance(cleaned)
