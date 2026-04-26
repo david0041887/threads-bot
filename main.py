@@ -656,6 +656,21 @@ async def telegram_message_handler(request: Request):
     return JSONResponse({"ok": True})
 
 
+@app.get("/admin/test-tg")
+async def test_tg_send():
+    """測試 Telegram 發送是否正常，回傳 token 前8碼和發送結果。"""
+    import os as _os
+    token = _os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = _os.getenv("TELEGRAM_CHAT_ID", "")
+    msg_id = send_telegram("🔧 TG 連線測試 OK")
+    return {
+        "token_prefix": token[:8] if token else "MISSING",
+        "chat_id": chat_id,
+        "message_id": msg_id,
+        "ok": msg_id is not None,
+    }
+
+
 @app.post("/admin/trigger-draft")
 async def manual_trigger():
     await daily_draft_job()
