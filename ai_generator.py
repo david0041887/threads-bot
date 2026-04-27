@@ -359,11 +359,11 @@ def generate_reply(
 - 直接輸出回覆文字，什麼前綴都不要加
 """
 
+    history_section = f"對話脈絡：\n{history_text}\n\n" if history_text else ""
     context = f"""我的貼文：
 {post_text}
 
-{"對話脈絡：\n" + history_text if history_text else ""}
-@{commenter_username}：{comment_text}"""
+{history_section}@{commenter_username}：{comment_text}"""
 
     reply = _call_claude(system, context, max_tokens=300)
     return _apply_compliance(reply)
