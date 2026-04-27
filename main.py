@@ -73,6 +73,18 @@ def _current_access_token() -> str:
     return state.get_kv("threads_access_token") or os.environ["THREADS_ACCESS_TOKEN"]
 
 
+def _notify_error_throttled(category: str, msg: str, cooldown_seconds: int = 3600) -> None:
+    """notify_error 但同類別 1 小時內只送 1 次，避免每 2~15 分鐘的循環任務洗版。"""
+    import time as _time
+    key = f"last_error_notify_{category}"
+    last = state.get_kv(key)
+    now = int(_time.time())
+    if last and now - last < cooldown_seconds:
+        return
+    state.set_kv(key, now)
+    notify_error(f"[{category}] {msg}")
+
+
 def get_client() -> ThreadsClient:
     return ThreadsClient(
         access_token=_current_access_token(),
@@ -127,7 +139,8 @@ def _ensure_chromium():
 async def lifespan(app: FastAPI):
     state.init_db()
     _ensure_chromium()
-    scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), id="daily_draft", replace_existing=True)
+    scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), args=["morning"], id="daily_draft_morning", replace_existing=True)
+    scheduler.add_job(daily_draft_job, CronTrigger(hour=19, minute=0, timezone="Asia/Taipei"), args=["evening"], id="daily_draft_evening", replace_existing=True)
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_processed_ids(days=90), CronTrigger(day_of_week="sun", hour=4, minute=30, timezone="Asia/Taipei"), id="processed_ids_cleanup", replace_existing=True)
@@ -145,25 +158,26 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Threads AI Bot", lifespan=lifespan)
 
 
-async def daily_draft_job():
-    logger.info("執行每日草稿任務")
-    # 今日已產過就跳過，避免手動 + cron 同日重複觸發
+async def daily_draft_job(slot: str = "morning"):
+    logger.info(f"執行每日草稿任務 [{slot}]")
+    # 同一個 slot 同一天已跑過就跳過
     from datetime import datetime
     import pytz
     today = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d")
-    if state.get_kv("last_draft_date") == today:
-        logger.info(f"daily_draft_job: 今日 ({today}) 已產過草稿，跳過")
+    dedup_key = f"last_draft_{slot}"
+    if state.get_kv(dedup_key) == today:
+        logger.info(f"daily_draft_job [{slot}]: 今日 ({today}) 已產過草稿，跳過")
         return
     try:
         articles = generate_daily_topics()
         drafts = generate_post_drafts(articles, count=3)
         job_id = str(uuid.uuid4())[:8]
-        state.save_pending_job(job_id, {"drafts": drafts})
-        state.set_kv("last_draft_date", today)
-        notify_drafts_for_approval(drafts, job_id=job_id)
+        state.save_pending_job(job_id, {"drafts": drafts, "slot": slot})
+        state.set_kv(dedup_key, today)
+        notify_drafts_for_approval(drafts, job_id=job_id, slot=slot)
     except Exception as e:
-        logger.error(f"每日草稿任務失敗: {e}")
-        notify_error(str(e))
+        logger.error(f"每日草稿任務 [{slot}] 失敗: {e}")
+        notify_error(f"每日草稿 [{slot}] 失敗：{e}")
 
 
 async def poll_replies_job():
@@ -210,6 +224,7 @@ async def poll_replies_job():
                 notify_reply_for_approval(reply_job_id, reply.username, reply.text, reply_text, post.text)
     except Exception as e:
         logger.error(f"輪詢留言失敗: {e}")
+        _notify_error_throttled("poll_replies", str(e))
     finally:
         client.close()
 
@@ -246,6 +261,7 @@ async def proactive_patrol_job(force: bool = False):
         results = search_result.get("posts", [])
     except Exception as e:
         logger.error(f"[海巡] 爬蟲搜尋失敗: {e}")
+        _notify_error_throttled("patrol_search", str(e))
         return
 
     if not results:
@@ -303,6 +319,7 @@ async def proactive_patrol_job(force: bool = False):
             send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 發出 {replied_n} 則")
     except Exception as e:
         logger.error(f"[海巡] search_and_reply 失敗: {e}")
+        _notify_error_throttled("patrol_reply", str(e))
         if force:
             send_telegram(f"❌ 海巡執行失敗：{e}")
 
@@ -524,6 +541,38 @@ async def manual_patrol():
 @app.get("/admin/patrol-stats")
 async def patrol_stats():
     return {"daily_count": _get_counts()}
+
+
+@app.get("/admin/stats")
+async def admin_stats():
+    """Bot 整體狀態快照 — 給人看的儀表板。"""
+    jobs_info = []
+    for j in scheduler.get_jobs():
+        jobs_info.append({
+            "id": j.id,
+            "next_run": str(j.next_run_time) if j.next_run_time else None,
+        })
+    return {
+        "pending": {
+            "jobs": state.count_pending_jobs(),
+            "replies": state.count_pending_replies(),
+        },
+        "last_draft": {
+            "morning": state.get_kv("last_draft_morning"),
+            "evening": state.get_kv("last_draft_evening"),
+        },
+        "patrol": {
+            "schedulers_enabled": state.get_kv("schedulers_enabled", False),
+            "daily_count": _get_counts(),
+        },
+        "processed_ids": {
+            "reply": state.count_processed("reply"),
+            "proactive": state.count_processed("proactive"),
+            "self_replied": state.count_processed("self_replied"),
+        },
+        "scheduler_jobs": jobs_info,
+        "token_in_state_kv": bool(state.get_kv("threads_access_token")),
+    }
 
 
 @app.get("/admin/env-check")

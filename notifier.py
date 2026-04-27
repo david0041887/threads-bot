@@ -38,8 +38,10 @@ def send_telegram(message: str) -> bool:
     return False
 
 
-def notify_drafts_for_approval(drafts: list[dict], job_id: str, channel: Optional[str] = None) -> bool:
-    lines = [f"📋 今日發文草稿審核 (job: {job_id})\n"]
+def notify_drafts_for_approval(drafts: list[dict], job_id: str, slot: Optional[str] = None, channel: Optional[str] = None) -> bool:
+    slot_label = {"morning": "早上場", "evening": "晚上場"}.get(slot, "")
+    header = f"📋 {slot_label}發文草稿審核" if slot_label else "📋 今日發文草稿審核"
+    lines = [f"{header} (job: {job_id})\n"]
     for i, d in enumerate(drafts, 1):
         angle = d.get("angle", "")
         draft = d.get("draft", "")

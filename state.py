@@ -228,6 +228,30 @@ def cleanup_old_jobs(hours: int = 24) -> int:
     return total
 
 
+def count_processed(kind: str) -> int:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT COUNT(*) AS c FROM processed_ids WHERE kind = ?", (kind,)
+        ).fetchone()
+    return row["c"]
+
+
+def count_pending_jobs() -> int:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT COUNT(*) AS c FROM pending_jobs WHERE status = 'pending'"
+        ).fetchone()
+    return row["c"]
+
+
+def count_pending_replies() -> int:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT COUNT(*) AS c FROM pending_replies WHERE status = 'pending'"
+        ).fetchone()
+    return row["c"]
+
+
 def cleanup_old_processed_ids(days: int = 90) -> int:
     cutoff = int(time.time()) - days * 86400
     with _conn() as c:
