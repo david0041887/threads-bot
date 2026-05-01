@@ -415,6 +415,22 @@ async def telegram_message_handler(request: Request):
         asyncio.create_task(proactive_patrol_job(force=True))
         return JSONResponse({"ok": True})
 
+    # ── 手動產生草稿 ──────────────────────────────────
+    if text in ("產生草稿", "出草稿", "手動草稿"):
+        async def _manual_draft():
+            try:
+                send_telegram("✍️ 開始產生草稿，完成後發給你審核...")
+                articles = generate_daily_topics()
+                drafts = generate_post_drafts(articles, count=3)
+                job_id = str(uuid.uuid4())[:8]
+                state.save_pending_job(job_id, {"drafts": drafts, "slot": "manual"})
+                notify_drafts_for_approval(drafts, job_id=job_id, slot=None)
+            except Exception as e:
+                logger.error(f"手動產生草稿失敗: {e}")
+                send_telegram(f"❌ 草稿產生失敗：{e}")
+        asyncio.create_task(_manual_draft())
+        return JSONResponse({"ok": True})
+
     # ── 海巡控制 ──────────────────────────────────────
     if text == "海巡暫停":
         for jid in ("proactive_patrol", "poll_replies"):
