@@ -214,6 +214,23 @@ def set_kv(key: str, value) -> None:
         )
 
 
+# ─── 主題歷史（避免重複）──────────────────────────────────────
+
+def get_recent_topics(limit: int = 21) -> list[str]:
+    """取得最近使用過的主題標題，最多 limit 筆。"""
+    raw = get_kv("recent_topic_history", [])
+    return raw[-limit:] if isinstance(raw, list) else []
+
+
+def append_recent_topics(new_titles: list[str], keep: int = 21) -> None:
+    """將新主題加入歷史並保留最近 keep 筆。"""
+    history = get_kv("recent_topic_history", [])
+    if not isinstance(history, list):
+        history = []
+    history.extend(new_titles)
+    set_kv("recent_topic_history", history[-keep:])
+
+
 # ─── TTL 清理 ─────────────────────────────────────────────────
 
 def cleanup_old_jobs(hours: int = 24) -> int:

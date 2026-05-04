@@ -169,11 +169,13 @@ async def daily_draft_job(slot: str = "morning"):
         logger.info(f"daily_draft_job [{slot}]: 今日 ({today}) 已產過草稿，跳過")
         return
     try:
-        articles = generate_daily_topics()
+        excluded = state.get_recent_topics(limit=21)
+        articles = generate_daily_topics(excluded_topics=excluded)
         drafts = generate_post_drafts(articles, count=3)
         job_id = str(uuid.uuid4())[:8]
         state.save_pending_job(job_id, {"drafts": drafts, "slot": slot})
         state.set_kv(dedup_key, today)
+        state.append_recent_topics([a["title"] for a in articles])
         notify_drafts_for_approval(drafts, job_id=job_id, slot=slot)
     except Exception as e:
         logger.error(f"每日草稿任務 [{slot}] 失敗: {e}")
@@ -420,10 +422,12 @@ async def telegram_message_handler(request: Request):
         async def _manual_draft():
             try:
                 send_telegram("✍️ 開始產生草稿，完成後發給你審核...")
-                articles = generate_daily_topics()
+                excluded = state.get_recent_topics(limit=21)
+                articles = generate_daily_topics(excluded_topics=excluded)
                 drafts = generate_post_drafts(articles, count=3)
                 job_id = str(uuid.uuid4())[:8]
                 state.save_pending_job(job_id, {"drafts": drafts, "slot": "manual"})
+                state.append_recent_topics([a["title"] for a in articles])
                 notify_drafts_for_approval(drafts, job_id=job_id, slot=None)
             except Exception as e:
                 logger.error(f"手動產生草稿失敗: {e}")
