@@ -708,6 +708,7 @@ def generate_reply(
 - 最多 2～3 句，50 字以內最理想
 - 不加 hashtag，不加引號
 - 直接輸出回覆文字，不加任何前綴
+- 適當換行，不要全部連在一起
 """
 
     history_section = f"對話脈絡：\n{history_text}\n\n" if history_text else ""
@@ -796,13 +797,15 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 - 不招攬：不說「歡迎聯絡」「歡迎諮詢」「找業務員」「私訊我」
 - 不加 @username 或任何 @tag
 - 【年期】若涉及「定期 vs 終身」，一律站在定期優先立場
+- 每個觀點獨立一行，不要全部連在一起寫
 
 【輸出規則——最重要】
 你只有兩種輸出，選一種：
 1. 有保險知識可補充 → 直接輸出留言文字
 2. 沒有有價值的東西可補充 → 輸出 <<SKIP>>
 
-不管什麼理由決定不回，一律輸出 <<SKIP>>，不要說任何解釋。"""
+不管什麼理由決定不回，一律輸出 <<SKIP>>，一個字都不要多說。
+廣告貼文、與保險完全無關、具體理賠細節詢問（如哪些收據可報銷）→ 一律 <<SKIP>>。"""
 
     user = f"""搜尋關鍵字：{keyword}
 
@@ -814,6 +817,11 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
         cleaned = result.strip().strip('"').strip("'").strip()
         if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 5:
             logger.info(f"[海巡] 步驟二跳過: {cleaned[:40]!r}")
+            return ""
+        # Defence-in-depth：攔截 Claude 仍然輸出解釋性文字的情況
+        _META_PHRASES = ("不適合", "無法回覆", "沒辦法回覆", "不建議回覆", "此貼文", "這篇貼文", "這則貼文")
+        if any(p in cleaned for p in _META_PHRASES):
+            logger.info(f"[海巡] 過濾 meta 解釋性回覆: {cleaned[:40]!r}")
             return ""
         # 步驟三
         if not _reply_passes_quality_gate(cleaned):

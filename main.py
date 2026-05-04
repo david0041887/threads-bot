@@ -44,8 +44,13 @@ scheduler = AsyncIOScheduler()
 SEARCH_KEYWORDS = [
     "保險", "壽險", "醫療險", "遺產稅", "節稅", "保費",
     "保單", "理賠", "投資型保單", "重大傷病", "實支實付",
-    "保障規劃", "退休規劃", "保險稅務"
+    "保障規劃", "退休規劃", "保險稅務",
+    "住院自費", "保費太貴", "買錯保險", "受益人", "理賠被拒",
+    "定期壽險", "意外險", "癌症險", "長照", "失能險",
+    "儲蓄險", "醫療費用", "手術費", "保險規劃", "受益人指定",
 ]
+
+PATROL_MAX_AGE_HOURS = 48  # 只回覆 48 小時內的貼文
 
 # 每日海巡配額
 PATROL_SCHEDULE = {
@@ -279,6 +284,9 @@ async def proactive_patrol_job(force: bool = False):
         if state.is_processed("proactive", post.shortcode):
             continue
         if not post.text or len(post.text) < 20:
+            continue
+        if post.age_hours > PATROL_MAX_AGE_HOURS:
+            logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={post.age_hours}h")
             continue
         reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
         logger.info(f"[海巡] @{post.username} reply_len={len(reply_text)} preview={reply_text[:40]!r}")

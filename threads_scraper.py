@@ -39,10 +39,34 @@ class ScrapedPost:
     text: str
     username: str
     media_id: str = ""
+    age_hours: int = 9999  # 貼文年齡（小時），9999=無法判斷
 
     @property
     def id(self) -> str:
         return self.media_id or _shortcode_to_id(self.shortcode)
+
+
+def _parse_post_text(raw_text: str) -> tuple[str, int]:
+    """清理貼文文字，同時萃取時間戳轉為小時數。回傳 (clean_text, age_hours)。"""
+    lines = raw_text.splitlines()
+    clean_lines = []
+    age_hours = 9999
+    skipping = True
+    for line in lines:
+        s = line.strip()
+        if skipping:
+            if not s:
+                continue
+            ts = re.match(r'^(\d+)([hdw])$', s)
+            if ts:
+                n, unit = int(ts.group(1)), ts.group(2)
+                age_hours = n if unit == 'h' else n * 24 if unit == 'd' else n * 168
+                continue
+            if len(s) < 15 or re.match(r'^@?\w{1,20}$', s):
+                continue
+            skipping = False
+        clean_lines.append(s)
+    return ("\n".join(clean_lines).strip() or raw_text), age_hours
 
 
 async def _ensure_logged_in(page, context) -> bool:
@@ -266,7 +290,6 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
 
                     raw_text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
-                    # 優先用 API 攔截到的 pk，其次 DOM 屬性，最後 shortcode 換算
                     media_id = (
                         api_pk_map.get(shortcode)
                         or (result.get("mediaId") or "").strip()
@@ -274,24 +297,14 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                     )
                     logger.debug(f"[海巡] shortcode={shortcode} media_id={media_id} (api_map={bool(api_pk_map.get(shortcode))})")
 
-                    # 去除開頭的帳號名稱、時間戳、hashtag 等短行雜訊
-                    lines = raw_text.splitlines()
-                    clean_lines = []
-                    skipping = True
-                    for line in lines:
-                        s = line.strip()
-                        if skipping and (not s or len(s) < 15 or re.match(r"^\d+[hdw]$|^@?\w{1,20}$", s)):
-                            continue
-                        skipping = False
-                        clean_lines.append(s)
-                    text = "\n".join(clean_lines).strip() or raw_text
+                    text, age_hours = _parse_post_text(raw_text)
 
                     if not text or len(text) < 20:
                         continue
                     if username.lower() == my_username:
                         continue
 
-                    posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username, media_id=media_id))
+                    posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username, media_id=media_id, age_hours=age_hours))
                     if len(posts) >= limit:
                         break
 
@@ -529,19 +542,10 @@ async def search_and_reply_async(
                     raw_text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
                     media_id = api_pk_map.get(sc) or (result.get("mediaId") or "").strip() or _shortcode_to_id(sc)
-                    lines = raw_text.splitlines()
-                    clean = []
-                    skip = True
-                    for line in lines:
-                        s = line.strip()
-                        if skip and (not s or len(s) < 15 or re.match(r"^\d+[hdw]$|^@?\w{1,20}$", s)):
-                            continue
-                        skip = False
-                        clean.append(s)
-                    text = "\n".join(clean).strip() or raw_text
+                    text, age_hours = _parse_post_text(raw_text)
                     if not text or len(text) < 20 or username.lower() == my_username:
                         continue
-                    posts.append(ScrapedPost(shortcode=sc, text=text, username=username, media_id=media_id))
+                    posts.append(ScrapedPost(shortcode=sc, text=text, username=username, media_id=media_id, age_hours=age_hours))
                 except Exception:
                     pass
 
