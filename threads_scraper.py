@@ -57,10 +57,17 @@ def _parse_post_text(raw_text: str) -> tuple[str, int]:
         if skipping:
             if not s:
                 continue
-            ts = re.match(r'^(\d+)([hdw])$', s)
+            ts = re.match(r'^(\d+)([mhdw])$', s)
             if ts:
                 n, unit = int(ts.group(1)), ts.group(2)
-                age_hours = n if unit == 'h' else n * 24 if unit == 'd' else n * 168
+                if unit == 'm':
+                    age_hours = 1  # 幾分鐘內的貼文視為 1 小時
+                elif unit == 'h':
+                    age_hours = n
+                elif unit == 'd':
+                    age_hours = n * 24
+                else:
+                    age_hours = n * 168
                 continue
             if len(s) < 15 or re.match(r'^@?\w{1,20}$', s):
                 continue
@@ -222,7 +229,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                 return []
 
             encoded = urllib.parse.quote(keyword)
-            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=default"
+            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=recent"
             logger.info(f"[海巡] 前往搜尋頁面: {search_url}")
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
             logger.info(f"[海巡] 目前 URL: {page.url}")
@@ -494,7 +501,7 @@ async def search_and_reply_async(
             page.on("response", _capture_pk)
 
             encoded = urllib.parse.quote(keyword)
-            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=default"
+            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=recent"
             await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
             await asyncio.sleep(3)
 
