@@ -420,10 +420,12 @@ async def _ui_reply_to_post(page, post_url: str, reply_text: str) -> bool:
 async def search_and_reply_async(
     keyword: str,
     reply_tasks: list[dict],  # [{"shortcode": ..., "username": ..., "text": ...}]
+    skip_search: bool = False,  # True = 跳過搜尋階段，只做 UI 回覆（Phase 2 用）
 ) -> dict:
     """
     在同一個登入瀏覽器 session 中：先搜尋關鍵字貼文，再對指定貼文用 UI 回覆。
     reply_tasks: 要回覆的貼文清單，每筆含 shortcode, username, reply_text
+    skip_search: Phase 2 傳 True，跳過搜尋直接回覆，省一次 Threads 請求
     回傳 {"posts": [...], "replied": [shortcode, ...], "failed": [shortcode, ...]}
     """
     async with async_playwright() as p:
@@ -480,83 +482,84 @@ async def search_and_reply_async(
                 logger.error("[海巡] 未登入，無法執行")
                 return {"posts": [], "replied": [], "failed": [t["shortcode"] for t in reply_tasks]}
 
-            # 搜尋
-            api_pk_map: dict[str, str] = {}
+            # 搜尋（Phase 2 傳 skip_search=True 時跳過）
+            if not skip_search:
+                api_pk_map: dict[str, str] = {}
 
-            async def _capture_pk(response):
+                async def _capture_pk(response):
+                    try:
+                        ct = response.headers.get("content-type", "")
+                        if "json" not in ct and "javascript" not in ct:
+                            return
+                        body = await response.text()
+                        has_id = '"pk"' in body or ('"id"' in body and len(body) > 500)
+                        has_code = '"code"' in body or '"shortcode"' in body or '/post/' in body
+                        if has_id and has_code:
+                            found = _extract_pk_map(body)
+                            if found:
+                                api_pk_map.update(found)
+                    except Exception:
+                        pass
+
+                page.on("response", _capture_pk)
+
+                encoded = urllib.parse.quote(keyword)
+                search_url = f"https://www.threads.com/search?q={encoded}&serp_type=recent"
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
+                await asyncio.sleep(3)
+
                 try:
-                    ct = response.headers.get("content-type", "")
-                    if "json" not in ct and "javascript" not in ct:
-                        return
-                    body = await response.text()
-                    has_id = '"pk"' in body or ('"id"' in body and len(body) > 500)
-                    has_code = '"code"' in body or '"shortcode"' in body or '/post/' in body
-                    if has_id and has_code:
-                        found = _extract_pk_map(body)
-                        if found:
-                            api_pk_map.update(found)
+                    await page.wait_for_selector('a[href*="/post/"]', timeout=12000)
+                    for _ in range(3):
+                        await page.evaluate("window.scrollBy(0, window.innerHeight)")
+                        await asyncio.sleep(1.5)
                 except Exception:
                     pass
 
-            page.on("response", _capture_pk)
+                logger.info(f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk")
 
-            encoded = urllib.parse.quote(keyword)
-            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=recent"
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(3)
+                # 搜集貼文
+                my_username = os.environ.get("THREADS_USERNAME", "").lower()
+                post_links = await page.query_selector_all('a[href*="/post/"]')
+                seen: set[str] = set()
+                for link_el in post_links[:60]:
+                    try:
+                        href = await link_el.get_attribute("href") or ""
+                        m = re.search(r"/post/([A-Za-z0-9_-]+)", href)
+                        if not m:
+                            continue
+                        sc = m.group(1)
+                        if sc in seen:
+                            continue
+                        seen.add(sc)
+                        result = await link_el.evaluate("""el => {
+                            let node = el, text = '', username = '', mediaId = '';
+                            for (let i = 0; i < 15; i++) {
+                                node = node.parentElement; if (!node) break;
+                                const t = (node.innerText||'').trim();
+                                const did = node.getAttribute('data-id')||node.getAttribute('data-post-id')||node.getAttribute('data-media-id');
+                                if (did && /^\\d{10,}$/.test(did)) mediaId = did;
+                                if (!text && t.length > 50) text = t.slice(0,500);
+                            }
+                            node = el;
+                            for (let i = 0; i < 15; i++) {
+                                node = node.parentElement; if (!node) break;
+                                const uLink = node.querySelector('a[href^="/@"]');
+                                if (uLink) { username=(uLink.getAttribute('href')||'').replace(/^\\/@/,'').split('/')[0]; break; }
+                            }
+                            return {text,username,mediaId};
+                        }""")
+                        raw_text = (result.get("text") or "").strip()
+                        username = (result.get("username") or "").strip()
+                        media_id = api_pk_map.get(sc) or (result.get("mediaId") or "").strip() or _shortcode_to_id(sc)
+                        text, age_hours = _parse_post_text(raw_text)
+                        if not text or len(text) < 20 or username.lower() == my_username:
+                            continue
+                        posts.append(ScrapedPost(shortcode=sc, text=text, username=username, media_id=media_id, age_hours=age_hours))
+                    except Exception:
+                        pass
 
-            try:
-                await page.wait_for_selector('a[href*="/post/"]', timeout=12000)
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, window.innerHeight)")
-                    await asyncio.sleep(1.5)
-            except Exception:
-                pass
-
-            logger.info(f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk")
-
-            # 搜集貼文
-            my_username = os.environ.get("THREADS_USERNAME", "").lower()
-            post_links = await page.query_selector_all('a[href*="/post/"]')
-            seen: set[str] = set()
-            for link_el in post_links[:60]:
-                try:
-                    href = await link_el.get_attribute("href") or ""
-                    m = re.search(r"/post/([A-Za-z0-9_-]+)", href)
-                    if not m:
-                        continue
-                    sc = m.group(1)
-                    if sc in seen:
-                        continue
-                    seen.add(sc)
-                    result = await link_el.evaluate("""el => {
-                        let node = el, text = '', username = '', mediaId = '';
-                        for (let i = 0; i < 15; i++) {
-                            node = node.parentElement; if (!node) break;
-                            const t = (node.innerText||'').trim();
-                            const did = node.getAttribute('data-id')||node.getAttribute('data-post-id')||node.getAttribute('data-media-id');
-                            if (did && /^\\d{10,}$/.test(did)) mediaId = did;
-                            if (!text && t.length > 50) text = t.slice(0,500);
-                        }
-                        node = el;
-                        for (let i = 0; i < 15; i++) {
-                            node = node.parentElement; if (!node) break;
-                            const uLink = node.querySelector('a[href^="/@"]');
-                            if (uLink) { username=(uLink.getAttribute('href')||'').replace(/^\\/@/,'').split('/')[0]; break; }
-                        }
-                        return {text,username,mediaId};
-                    }""")
-                    raw_text = (result.get("text") or "").strip()
-                    username = (result.get("username") or "").strip()
-                    media_id = api_pk_map.get(sc) or (result.get("mediaId") or "").strip() or _shortcode_to_id(sc)
-                    text, age_hours = _parse_post_text(raw_text)
-                    if not text or len(text) < 20 or username.lower() == my_username:
-                        continue
-                    posts.append(ScrapedPost(shortcode=sc, text=text, username=username, media_id=media_id, age_hours=age_hours))
-                except Exception:
-                    pass
-
-            logger.info(f"[海巡] 找到 {len(posts)} 篇貼文")
+                logger.info(f"[海巡] 找到 {len(posts)} 篇貼文")
 
             # 對指定貼文做 UI 回覆
             for task in reply_tasks:

@@ -306,9 +306,9 @@ async def proactive_patrol_job(force: bool = False):
             send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇，無合適內容可回覆")
         return
 
-    # Phase 2：用新的 browser session 做 UI 回覆（帶 reply_tasks）
+    # Phase 2：用新的 browser session 做 UI 回覆（帶 reply_tasks，跳過搜尋）
     try:
-        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks)
+        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks, skip_search=True)
         for sc in result.get("replied", []):
             if not force:
                 _bump_count(session)
@@ -548,7 +548,17 @@ async def test_tg_send():
 
 @app.post("/admin/trigger-draft")
 async def manual_trigger():
-    await daily_draft_job()
+    """手動觸發草稿，不影響排程的 dedup key（不會擋掉今天的正常早晚場）。"""
+    try:
+        excluded = state.get_recent_topics(limit=21)
+        articles = generate_daily_topics(excluded_topics=excluded)
+        drafts = generate_post_drafts(articles, count=3)
+        job_id = str(uuid.uuid4())[:8]
+        state.save_pending_job(job_id, {"drafts": drafts, "slot": "manual"})
+        state.append_recent_topics([a["title"] for a in articles])
+        notify_drafts_for_approval(drafts, job_id=job_id, slot=None)
+    except Exception as e:
+        notify_error(f"手動觸發草稿失敗: {e}")
     return {"status": "triggered"}
 
 

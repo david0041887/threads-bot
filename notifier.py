@@ -15,27 +15,28 @@ logger = logging.getLogger(__name__)
 CONTROL_URL = "https://threads-bot-production-93cc.up.railway.app/control"
 
 
-def send_telegram(message: str) -> bool:
+def send_telegram(message: str) -> Optional[int]:
+    """發送 TG 訊息，成功回傳 message_id，失敗回傳 None。"""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not bot_token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未設定")
-        return False
+        return None
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message}
     for i in range(3):
         try:
             resp = httpx.post(url, json=payload, timeout=10)
             resp.raise_for_status()
-            return True
+            return resp.json().get("result", {}).get("message_id")
         except (httpx.HTTPError, httpx.TimeoutException) as e:
             if i == 2:
                 logger.error(f"Telegram 發送失敗（3 次皆失敗）: {e}")
-                return False
+                return None
             delay = 1.0 * (2 ** i)
             logger.warning(f"Telegram 發送第 {i+1} 次失敗，{delay}s 後重試: {e}")
             time.sleep(delay)
-    return False
+    return None
 
 
 def notify_drafts_for_approval(drafts: list[dict], job_id: str, slot: Optional[str] = None, channel: Optional[str] = None) -> bool:
