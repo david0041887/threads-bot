@@ -50,7 +50,7 @@ SEARCH_KEYWORDS = [
     "儲蓄險", "醫療費用", "手術費", "保險規劃", "受益人指定",
 ]
 
-PATROL_MAX_AGE_HOURS = 48  # 只回覆 48 小時內的貼文
+PATROL_MAX_AGE_HOURS = 1440  # 只回覆 60 天內的貼文（60×24）
 
 # 每日海巡配額
 PATROL_SCHEDULE = {
