@@ -56,7 +56,10 @@ class ThreadsClient:
         self.access_token = access_token
         self.user_id = user_id
         self.timeout = timeout
-        self._http = httpx.Client(timeout=timeout)
+        # connect 快速失敗，read 給 60 秒（Threads API 偶爾慢）
+        self._http = httpx.Client(
+            timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=5.0)
+        )
 
     def _get(self, path: str, params: dict = None) -> dict:
         params = params or {}

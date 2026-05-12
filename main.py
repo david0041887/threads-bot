@@ -191,7 +191,6 @@ async def poll_replies_job():
     """每 2 分鐘輪詢自己貼文的留言"""
     logger.info("輪詢留言中...")
     client = get_client()
-    my_username = os.environ.get("THREADS_USERNAME", "").lower()
     try:
         posts = client.get_my_posts(limit=5)
         for post in posts:
@@ -199,18 +198,6 @@ async def poll_replies_job():
             for reply in replies:
                 if state.is_processed("reply", reply.id):
                     continue
-                # 走過我們自己 approve 流程的留言，不需再打 API 檢查
-                if state.is_processed("self_replied", reply.id):
-                    state.mark_processed("reply", reply.id)
-                    continue
-                # 否則用 API 查是否已在 Threads UI 上回過（邊界情況）
-                if my_username:
-                    sub_replies = client.get_sub_replies(reply.id)
-                    if any(sr.username.lower() == my_username for sr in sub_replies):
-                        state.mark_processed("reply", reply.id)
-                        state.mark_processed("self_replied", reply.id)
-                        logger.info(f"已跳過已回覆留言 @{reply.username}: {reply.text[:30]}")
-                        continue
                 state.mark_processed("reply", reply.id)
                 if not reply.text:
                     continue
