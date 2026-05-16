@@ -20,8 +20,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import state
 from threads_client import ThreadsClient
-from ai_generator import generate_post_drafts, generate_reply, generate_daily_topics, generate_proactive_reply
-from notifier import notify_drafts_for_approval, notify_error, notify_reply_for_approval, send_telegram
+from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply
+from notifier import notify_error, notify_reply_for_approval, send_telegram
 
 logging.basicConfig(
     level=logging.INFO,
@@ -163,28 +163,37 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Threads AI Bot", lifespan=lifespan)
 
 
+def _notify_topics(topics: list[dict], slot: Optional[str] = None) -> None:
+    """把主題清單格式化後發 TG。"""
+    slot_label = {"morning": "早上場", "evening": "晚上場"}.get(slot or "", "")
+    header = f"📋 {slot_label}今日發文主題" if slot_label else "📋 今日發文主題"
+    lines = [header, ""]
+    for i, t in enumerate(topics, 1):
+        lines.append(f"[{i}] {t['title']}")
+        if t.get("summary"):
+            lines.append(f"    角度：{t['summary']}")
+        lines.append("")
+    send_telegram("\n".join(lines).strip())
+
+
 async def daily_draft_job(slot: str = "morning"):
-    logger.info(f"執行每日草稿任務 [{slot}]")
-    # 同一個 slot 同一天已跑過就跳過
+    logger.info(f"執行每日主題任務 [{slot}]")
     from datetime import datetime
     import pytz
     today = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d")
     dedup_key = f"last_draft_{slot}"
     if state.get_kv(dedup_key) == today:
-        logger.info(f"daily_draft_job [{slot}]: 今日 ({today}) 已產過草稿，跳過")
+        logger.info(f"daily_draft_job [{slot}]: 今日 ({today}) 已產過主題，跳過")
         return
     try:
         excluded = state.get_recent_topics(limit=21)
-        articles = generate_daily_topics(excluded_topics=excluded)
-        drafts = generate_post_drafts(articles, count=3)
-        job_id = str(uuid.uuid4())[:8]
-        state.save_pending_job(job_id, {"drafts": drafts, "slot": slot})
+        topics = generate_daily_topics(excluded_topics=excluded)
         state.set_kv(dedup_key, today)
-        state.append_recent_topics([a["title"] for a in articles])
-        notify_drafts_for_approval(drafts, job_id=job_id, slot=slot)
+        state.append_recent_topics([t["title"] for t in topics])
+        _notify_topics(topics, slot=slot)
     except Exception as e:
-        logger.error(f"每日草稿任務 [{slot}] 失敗: {e}")
-        notify_error(f"每日草稿 [{slot}] 失敗：{e}")
+        logger.error(f"每日主題任務 [{slot}] 失敗: {e}")
+        notify_error(f"每日主題 [{slot}] 失敗：{e}")
 
 
 async def poll_replies_job():
@@ -412,22 +421,19 @@ async def telegram_message_handler(request: Request):
         asyncio.create_task(proactive_patrol_job(force=True))
         return JSONResponse({"ok": True})
 
-    # ── 手動產生草稿 ──────────────────────────────────
-    if text in ("產生草稿", "出草稿", "手動草稿"):
-        async def _manual_draft():
+    # ── 手動產生主題 ──────────────────────────────────
+    if text in ("產生草稿", "出草稿", "手動草稿", "產主題", "出主題"):
+        async def _manual_topics():
             try:
-                send_telegram("✍️ 開始產生草稿，完成後發給你審核...")
+                send_telegram("✍️ 正在產生主題...")
                 excluded = state.get_recent_topics(limit=21)
-                articles = generate_daily_topics(excluded_topics=excluded)
-                drafts = generate_post_drafts(articles, count=3)
-                job_id = str(uuid.uuid4())[:8]
-                state.save_pending_job(job_id, {"drafts": drafts, "slot": "manual"})
-                state.append_recent_topics([a["title"] for a in articles])
-                notify_drafts_for_approval(drafts, job_id=job_id, slot=None)
+                topics = generate_daily_topics(excluded_topics=excluded)
+                state.append_recent_topics([t["title"] for t in topics])
+                _notify_topics(topics, slot=None)
             except Exception as e:
-                logger.error(f"手動產生草稿失敗: {e}")
-                send_telegram(f"❌ 草稿產生失敗：{e}")
-        asyncio.create_task(_manual_draft())
+                logger.error(f"手動產生主題失敗: {e}")
+                send_telegram(f"❌ 主題產生失敗：{e}")
+        asyncio.create_task(_manual_topics())
         return JSONResponse({"ok": True})
 
     # ── 海巡控制 ──────────────────────────────────────
@@ -535,17 +541,14 @@ async def test_tg_send():
 
 @app.post("/admin/trigger-draft")
 async def manual_trigger():
-    """手動觸發草稿，不影響排程的 dedup key（不會擋掉今天的正常早晚場）。"""
+    """手動觸發主題產生，不影響排程的 dedup key。"""
     try:
         excluded = state.get_recent_topics(limit=21)
-        articles = generate_daily_topics(excluded_topics=excluded)
-        drafts = generate_post_drafts(articles, count=3)
-        job_id = str(uuid.uuid4())[:8]
-        state.save_pending_job(job_id, {"drafts": drafts, "slot": "manual"})
-        state.append_recent_topics([a["title"] for a in articles])
-        notify_drafts_for_approval(drafts, job_id=job_id, slot=None)
+        topics = generate_daily_topics(excluded_topics=excluded)
+        state.append_recent_topics([t["title"] for t in topics])
+        _notify_topics(topics, slot=None)
     except Exception as e:
-        notify_error(f"手動觸發草稿失敗: {e}")
+        notify_error(f"手動觸發主題失敗: {e}")
     return {"status": "triggered"}
 
 
