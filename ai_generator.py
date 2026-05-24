@@ -972,6 +972,15 @@ def _reply_passes_quality_gate(reply_text: str) -> bool:
         return False
 
 
+_PATROL_REPLY_STYLES = [
+    "有點直接，說完就走，不解釋，像是路過剛好知道這件事",
+    "隨意但有料，像在傳訊息給朋友，語氣輕鬆但資訊是真的",
+    "冷靜指出一個細節，不帶情緒，有點像在更正一個常見誤解",
+    "帶點好奇的口吻，問一個你其實知道答案的問題來帶出觀點",
+    "直接接話，接著他說的情境往下說，不重新開場",
+]
+
+
 def generate_proactive_reply(post_text: str, keyword: str) -> str:
     """
     針對他人保險相關貼文生成主動回覆。三步驟過濾確保不發出 meta 解釋文字。
@@ -979,47 +988,29 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
     步驟二：生成回覆，無內容輸出 <<SKIP>>
     步驟三：語意品質審查
     """
+    import random as _random
     # 步驟一
     if not _is_insurance_related(post_text):
         return ""
 
     # 步驟二
+    style = _random.choice(_PATROL_REPLY_STYLES)
     system = f"""{ACCOUNT_PERSONA}
 
-你正在主動回覆 Threads 上的公開貼文，任務是補充有用的保險知識觀點。
+你是「保險視界」，在 Threads 上看到一篇帖子，想留個有料的留言。
 
-━━━ 語氣禁區（出現就是失敗）━━━
-- 「感謝分享」「很有共鳴」「說得很好」「這點很重要」
-- 「確實如此」「非常認同」「您說得對」
-- 「建議您」「可以考慮」「值得注意」
-- 「保險規劃確實很重要」「保障真的很關鍵」
-- 任何以「其實」「坦白說」開頭但後面是廢話的
-- 任何說完沒有實質資訊量的句子
+今天的說話方式：{style}
 
-━━━ 要這樣寫 ━━━
-- 直接切進去，第一句就有內容
-- 口語、有立場、說完停
-- 像朋友在留言，不是客服在回覆
+你怎麼做：讀懂這篇在說什麼，找到一個你可以補充的保險知識角度，直接切進去說，說完停。像是聊天中有人說了一件事，你剛好知道一個它背後的細節，插一句。
 
-━━━ 規則 ━━━
-- 不超過 80 字，2 句以內最理想
-- 不提具體保險公司或商品名稱
-- 不招攬：不說「歡迎聯絡」「歡迎諮詢」「找業務員」「私訊我」
-- 不加 @username 或任何 @tag
-- 【年期】若涉及「定期 vs 終身」，一律站在定期優先立場
-- 每個觀點獨立一行，不要全部連在一起寫
+如果沒料可補（純閒聊、廣告、純圖、理賠流程細節）→ 輸出 <<SKIP>>
 
-【輸出規則——最重要】
-你只有兩種輸出，選一種：
-1. 有保險知識可補充 → 直接輸出留言文字
-2. 沒有有價值的東西可補充 → 輸出 <<SKIP>>
+不能出現的：「感謝分享」「說得很好」「建議您」「歡迎諮詢」「私訊我」「找業務員」、任何純應聲沒資訊的句子、超過 2 句。
+不加 @tag，不提保險公司名稱。定期 vs 終身：一律站定期優先。
 
-不管什麼理由決定不回，一律輸出 <<SKIP>>，一個字都不要多說。
-廣告貼文、與保險完全無關、具體理賠細節詢問（如哪些收據可報銷）→ 一律 <<SKIP>>。"""
+只有兩種輸出：留言文字，或 <<SKIP>>。"""
 
-    user = f"""搜尋關鍵字：{keyword}
-
-貼文內容：
+    user = f"""貼文：
 {post_text}"""
 
     try:
@@ -1048,43 +1039,44 @@ def generate_short_reaction(post_text: str) -> str:
     用於 generate_proactive_reply 回傳空字串時的 fallback。
 
     防亂回機制：
-    - AI 必須先用一句話說出「這篇在說什麼」才能繼續
-    - 如果貼文太短 / 圖片說明 / 看不懂 → 輸出 <<SKIP>>
-    - 回應必須帶到貼文的具體內容，不能是萬用廢話
+    - 要求 AI 先輸出「ANCHOR: 從貼文找到的具體字詞」，找不到就 SKIP
+    - Python 層再擋萬用廢話
     """
-    if not post_text or len(post_text.strip()) < 25:
+    if not post_text or len(post_text.strip()) < 40:
         return ""
 
-    system = """你是 Threads 上的一個路人，看到一篇貼文想留個短留言。
+    system = """你看到一篇 Threads 貼文。你要留一句自然的反應留言。
 
-任務：
-1. 先在心裡確認「這篇貼文在說什麼」——如果你讀不懂、貼文只是圖片說明、或內容少到無從回應，輸出 <<SKIP>>
-2. 如果讀懂了，留一句自然的人類反應，必須帶到貼文的具體內容（人物、情境、或觀點），不能是萬用廢話
+步驟一：從貼文裡找一個具體的字詞或情境（人名、金額、事件、狀況、情緒⋯，必須是貼文裡真實出現的東西）。
+步驟二：用那個東西寫一句反應，讓人感覺你真的讀了這篇。
 
-禁止輸出（出現就改輸出 <<SKIP>>）：
-- 「加油」「棒」「讚」「好可愛」「哈哈」「哈哈哈」「XD」
-- 「這個很重要」「真的欸」「確實如此」「說得好」——任何不帶具體內容的應聲
-- 任何保險相關知識、建議、或推銷
-- @username 標記
-- 超過 20 字
+輸出格式（必須遵守，兩行都要）：
+ANCHOR: [你找到的具體字詞]
+REPLY: [你的留言，≤20字]
 
-輸出格式：
-- 只輸出留言文字（1 句，≤20 字）
-- 或輸出 <<SKIP>>
-- 不加任何前綴說明"""
+如果你找不到任何具體內容（純圖片說明、空洞、完全讀不懂），輸出：
+ANCHOR: <<SKIP>>
+REPLY: <<SKIP>>
+
+REPLY 禁止出現：「加油」「棒」「讚」「哈哈」「真的欸」「確實」「說得好」「很重要」「好可愛」、保險知識、@標記、超過 20 字。"""
 
     try:
-        result = _call_claude(system, f"貼文：\n{post_text.strip()}", max_tokens=60)
-        cleaned = result.strip().strip('"').strip("'").strip()
-        if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 4 or len(cleaned) > 40:
-            logger.info(f"[海巡反應] 跳過: {cleaned[:40]!r}")
+        result = _call_claude(system, f"貼文：\n{post_text.strip()}", max_tokens=80)
+        # 解析兩行輸出
+        reply = ""
+        for line in result.strip().splitlines():
+            if line.upper().startswith("REPLY:"):
+                reply = line.split(":", 1)[1].strip().strip('"').strip("'")
+                break
+        if not reply or "<<SKIP>>" in reply or len(reply) < 4 or len(reply) > 45:
+            logger.info(f"[海巡反應] 跳過: {reply[:40]!r}")
             return ""
-        _GENERIC_PHRASES = ("加油", "棒", "讚", "真的欸", "確實", "說得好", "哈哈", "XD", "好可愛", "很重要")
-        if any(p in cleaned for p in _GENERIC_PHRASES):
-            logger.info(f"[海巡反應] 過濾萬用廢話: {cleaned!r}")
+        _GENERIC = ("加油", "棒", "讚", "真的欸", "確實如此", "說得好", "哈哈", "XD", "好可愛", "很重要", "不錯")
+        if any(p in reply for p in _GENERIC):
+            logger.info(f"[海巡反應] 過濾萬用廢話: {reply!r}")
             return ""
-        logger.info(f"[海巡反應] 產生: {cleaned!r}")
-        return cleaned
+        logger.info(f"[海巡反應] 產生: {reply!r}")
+        return reply
     except Exception as e:
         logger.error(f"短反應生成失敗: {e}")
         return ""

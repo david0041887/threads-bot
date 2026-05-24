@@ -249,7 +249,9 @@ async def proactive_patrol_job(force: bool = False):
 
     batch = 2 if force else min(2, quota - used)
     keyword = random.choice(SEARCH_KEYWORDS)
-    logger.info(f"[海巡] 搜尋關鍵字：{keyword}，本批次：{batch} 則")
+    # 40% 機率搜熱門貼文，60% 搜最新
+    search_mode = "top" if random.random() < 0.4 else "recent"
+    logger.info(f"[海巡] 搜尋關鍵字：{keyword}，模式：{search_mode}，本批次：{batch} 則")
 
     if not PLAYWRIGHT_AVAILABLE:
         logger.warning("[海巡] Playwright 不可用，跳過本次海巡")
@@ -260,7 +262,7 @@ async def proactive_patrol_job(force: bool = False):
     # Phase 1：一個 browser session 完成搜尋 + Claude 生成 + UI 回覆
     try:
         # search_and_reply_async 會先搜尋並回傳貼文清單；reply_tasks 初始為空
-        search_result = await search_and_reply_async(keyword=keyword, reply_tasks=[])
+        search_result = await search_and_reply_async(keyword=keyword, reply_tasks=[], search_mode=search_mode)
         results = search_result.get("posts", [])
     except Exception as e:
         logger.error(f"[海巡] 爬蟲搜尋失敗: {e}")
@@ -309,7 +311,7 @@ async def proactive_patrol_job(force: bool = False):
 
     # Phase 2：用新的 browser session 做 UI 回覆（帶 reply_tasks，跳過搜尋）
     try:
-        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks, skip_search=True)
+        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks, skip_search=True, search_mode=search_mode)
         for sc in result.get("replied", []):
             if not force:
                 _bump_count(session)

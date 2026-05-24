@@ -178,7 +178,8 @@ def _extract_pk_map(json_text: str) -> dict[str, str]:
     return pk_map
 
 
-async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list[ScrapedPost]:
+async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_mode: str = "recent") -> list[ScrapedPost]:
+    """search_mode: "recent"（最新）或 "top"（熱門/爆文）"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -229,8 +230,9 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20) -> list
                 return []
 
             encoded = urllib.parse.quote(keyword)
-            search_url = f"https://www.threads.com/search?q={encoded}&serp_type=recent"
-            logger.info(f"[海巡] 前往搜尋頁面: {search_url}")
+            serp = "top" if search_mode == "top" else "recent"
+            search_url = f"https://www.threads.com/search?q={encoded}&serp_type={serp}"
+            logger.info(f"[海巡] 前往搜尋頁面 ({serp}): {search_url}")
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
             logger.info(f"[海巡] 目前 URL: {page.url}")
             await asyncio.sleep(3)
@@ -419,8 +421,9 @@ async def _ui_reply_to_post(page, post_url: str, reply_text: str) -> bool:
 
 async def search_and_reply_async(
     keyword: str,
-    reply_tasks: list[dict],  # [{"shortcode": ..., "username": ..., "text": ...}]
-    skip_search: bool = False,  # True = 跳過搜尋階段，只做 UI 回覆（Phase 2 用）
+    reply_tasks: list[dict],
+    skip_search: bool = False,
+    search_mode: str = "recent",  # "recent" 或 "top"
 ) -> dict:
     """
     在同一個登入瀏覽器 session 中：先搜尋關鍵字貼文，再對指定貼文用 UI 回覆。
@@ -504,7 +507,9 @@ async def search_and_reply_async(
                 page.on("response", _capture_pk)
 
                 encoded = urllib.parse.quote(keyword)
-                search_url = f"https://www.threads.com/search?q={encoded}&serp_type=recent"
+                serp = "top" if search_mode == "top" else "recent"
+                search_url = f"https://www.threads.com/search?q={encoded}&serp_type={serp}"
+                logger.info(f"[海巡] 搜尋模式={serp}: {search_url}")
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
                 await asyncio.sleep(3)
 
