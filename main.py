@@ -54,13 +54,13 @@ PATROL_MAX_AGE_HOURS = 1440  # 只回覆 60 天內的貼文（60×24）
 
 # 每日海巡配額
 PATROL_SCHEDULE = {
-    "morning": {"hour": "7-9", "count": 6},
     "noon":    {"hour": "12-13", "count": 7},
-    "evening": {"hour": "20-23", "count": 8},
+    "dusk":    {"hour": "17-19", "count": 6},
+    "evening": {"hour": "22-23", "count": 6},
 }
 
 _COUNTS_KEY = "daily_proactive_count"
-_COUNTS_DEFAULT = {"morning": 0, "noon": 0, "evening": 0, "date": ""}
+_COUNTS_DEFAULT = {"noon": 0, "dusk": 0, "evening": 0, "date": ""}
 
 
 def _get_counts() -> dict:
@@ -104,11 +104,11 @@ def get_current_session() -> Optional[str]:
     tz = pytz.timezone("Asia/Taipei")
     now = datetime.now(tz)
     h = now.hour
-    if 7 <= h < 9:
-        return "morning"
-    elif 12 <= h < 13:
+    if 12 <= h < 13:
         return "noon"
-    elif 20 <= h < 23:
+    elif 17 <= h < 19:
+        return "dusk"
+    elif 22 <= h < 23:
         return "evening"
     return None
 
