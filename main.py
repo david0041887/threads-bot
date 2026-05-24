@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import state
 from threads_client import ThreadsClient
-from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply
+from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction
 from notifier import notify_error, notify_reply_for_approval, send_telegram
 
 logging.basicConfig(
@@ -285,7 +285,11 @@ async def proactive_patrol_job(force: bool = False):
             logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={post.age_hours}h")
             continue
         reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
-        logger.info(f"[海巡] @{post.username} reply_len={len(reply_text)} preview={reply_text[:40]!r}")
+        reply_type = "insurance"
+        if not reply_text:
+            reply_text = generate_short_reaction(post.text)
+            reply_type = "reaction"
+        logger.info(f"[海巡] @{post.username} type={reply_type} reply_len={len(reply_text)} preview={reply_text[:40]!r}")
         if not reply_text:
             continue
         state.mark_processed("proactive", post.shortcode)
@@ -294,6 +298,7 @@ async def proactive_patrol_job(force: bool = False):
             "username": post.username,
             "text": post.text,
             "reply_text": reply_text,
+            "reply_type": reply_type,
         })
 
     if not reply_tasks:
@@ -310,8 +315,10 @@ async def proactive_patrol_job(force: bool = False):
                 _bump_count(session)
             task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
             logger.info(f"[海巡] UI 回覆成功 @{task.get('username')} shortcode={sc}")
+            rtype = task.get("reply_type", "insurance")
+            label = "🧠 知識型" if rtype == "insurance" else "👋 曝光型"
             send_telegram(
-                f"🔍 海巡回覆通知\n"
+                f"🔍 海巡回覆通知 {label}\n"
                 f"關鍵字：{keyword}\n"
                 f"@{task.get('username')}：{task.get('text','')[:80]}...\n"
                 f"─────────────\n"

@@ -1040,3 +1040,51 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
     except Exception as e:
         logger.error(f"主動回覆生成失敗: {e}")
         return ""
+
+
+def generate_short_reaction(post_text: str) -> str:
+    """
+    曝光型短反應：不注入保險知識，只留一句呼應貼文的自然反應。
+    用於 generate_proactive_reply 回傳空字串時的 fallback。
+
+    防亂回機制：
+    - AI 必須先用一句話說出「這篇在說什麼」才能繼續
+    - 如果貼文太短 / 圖片說明 / 看不懂 → 輸出 <<SKIP>>
+    - 回應必須帶到貼文的具體內容，不能是萬用廢話
+    """
+    if not post_text or len(post_text.strip()) < 25:
+        return ""
+
+    system = """你是 Threads 上的一個路人，看到一篇貼文想留個短留言。
+
+任務：
+1. 先在心裡確認「這篇貼文在說什麼」——如果你讀不懂、貼文只是圖片說明、或內容少到無從回應，輸出 <<SKIP>>
+2. 如果讀懂了，留一句自然的人類反應，必須帶到貼文的具體內容（人物、情境、或觀點），不能是萬用廢話
+
+禁止輸出（出現就改輸出 <<SKIP>>）：
+- 「加油」「棒」「讚」「好可愛」「哈哈」「哈哈哈」「XD」
+- 「這個很重要」「真的欸」「確實如此」「說得好」——任何不帶具體內容的應聲
+- 任何保險相關知識、建議、或推銷
+- @username 標記
+- 超過 20 字
+
+輸出格式：
+- 只輸出留言文字（1 句，≤20 字）
+- 或輸出 <<SKIP>>
+- 不加任何前綴說明"""
+
+    try:
+        result = _call_claude(system, f"貼文：\n{post_text.strip()}", max_tokens=60)
+        cleaned = result.strip().strip('"').strip("'").strip()
+        if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 4 or len(cleaned) > 40:
+            logger.info(f"[海巡反應] 跳過: {cleaned[:40]!r}")
+            return ""
+        _GENERIC_PHRASES = ("加油", "棒", "讚", "真的欸", "確實", "說得好", "哈哈", "XD", "好可愛", "很重要")
+        if any(p in cleaned for p in _GENERIC_PHRASES):
+            logger.info(f"[海巡反應] 過濾萬用廢話: {cleaned!r}")
+            return ""
+        logger.info(f"[海巡反應] 產生: {cleaned!r}")
+        return cleaned
+    except Exception as e:
+        logger.error(f"短反應生成失敗: {e}")
+        return ""
