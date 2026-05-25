@@ -65,7 +65,14 @@ class ThreadsClient:
         params = params or {}
         params["access_token"] = self.access_token
         url = f"{THREADS_API_BASE}/{path}"
-        resp = self._http.get(url, params=params)
+        for attempt in range(3):
+            resp = self._http.get(url, params=params)
+            if resp.status_code < 500:
+                break
+            if attempt < 2:
+                wait = 3 * (2 ** attempt)  # 3s, 6s
+                logger.warning(f"Threads API {resp.status_code}，{wait}s 後重試 (第 {attempt+1} 次)")
+                time.sleep(wait)
         resp.raise_for_status()
         return resp.json()
 

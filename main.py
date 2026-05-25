@@ -197,7 +197,12 @@ async def daily_draft_job(slot: str = "morning"):
 
 
 async def poll_replies_job():
-    """每 2 分鐘輪詢自己貼文的留言"""
+    """每 2 分鐘輪詢自己貼文的留言（只在 08:00–23:00 Taipei 執行）"""
+    from datetime import datetime
+    import pytz
+    h = datetime.now(pytz.timezone("Asia/Taipei")).hour
+    if not (8 <= h < 23):
+        return
     logger.info("輪詢留言中...")
     client = get_client()
     try:
