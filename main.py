@@ -346,12 +346,15 @@ async def _proactive_patrol_job_inner(force: bool = False):
     replied_n = 0
     try:
         for task in reply_tasks:
-            post_id = task.get("post_id", "")
-            if not post_id:
-                logger.warning(f"[海巡] 無 post_id，跳過 @{task.get('username')}")
+            # 優先用 oEmbed 取得真實 media_id，避免 shortcode 換算偏差
+            post_url = f"https://www.threads.com/@{task['username']}/post/{task['shortcode']}"
+            real_id = client.get_post_id_from_url(post_url) or task.get("post_id", "")
+            if not real_id:
+                logger.warning(f"[海巡] 無法取得 post_id，跳過 @{task.get('username')}")
                 continue
+            logger.info(f"[海巡] 回覆 @{task['username']} post_id={real_id}")
             try:
-                client.create_post(text=task["reply_text"], reply_to_id=post_id)
+                client.create_post(text=task["reply_text"], reply_to_id=real_id)
                 replied_n += 1
                 if not force:
                     _bump_count(session)

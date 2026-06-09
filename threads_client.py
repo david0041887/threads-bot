@@ -80,7 +80,14 @@ class ThreadsClient:
         data = data or {}
         data["access_token"] = self.access_token
         url = f"{THREADS_API_BASE}/{path}"
-        resp = self._http.post(url, data=data)
+        for attempt in range(3):
+            resp = self._http.post(url, data=data)
+            if resp.status_code < 500:
+                break
+            if attempt < 2:
+                wait = 3 * (2 ** attempt)
+                logger.warning(f"Threads API POST {resp.status_code}，{wait}s 後重試 (第 {attempt+1} 次)")
+                time.sleep(wait)
         if not resp.is_success:
             logger.error(f"API error {resp.status_code}: {resp.text[:500]}")
         resp.raise_for_status()
