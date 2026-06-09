@@ -255,7 +255,7 @@ async def _proactive_patrol_job_inner(force: bool = False):
     if not session:
         if not force:
             return
-        session = "morning"
+        session = "noon"  # force 模式沿用午間場配額
 
     quota = PATROL_SCHEDULE[session]["count"]
     used = _get_counts().get(session, 0)
