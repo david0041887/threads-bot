@@ -239,6 +239,17 @@ async def poll_replies_job():
 
 async def proactive_patrol_job(force: bool = False):
     """每 15 分鐘執行一次，用瀏覽器 UI 在串文底下直接回覆。force=True 可跳過時段限制。"""
+    try:
+        await _proactive_patrol_job_inner(force=force)
+    except Exception as e:
+        logger.error(f"[海巡] 未預期錯誤: {e}", exc_info=True)
+        if force:
+            send_telegram(f"❌ 手動海巡發生未預期錯誤：\n{type(e).__name__}: {e}")
+        else:
+            _notify_error_throttled("patrol_unexpected", str(e))
+
+
+async def _proactive_patrol_job_inner(force: bool = False):
     reset_daily_count()
     session = get_current_session()
     if not session:
@@ -446,7 +457,7 @@ async def telegram_message_handler(request: Request):
 
     # ── 手動海巡（不列入配額）─────────────────────────
     if text in ("海巡測試", "手動海巡"):
-        send_telegram("🔍 手動海巡啟動，不列入時段配額，結果將通知你")
+        send_telegram("🔍 手動海巡啟動，結果將通知你（如 3 分鐘後沒有回報，請查 Railway log）")
         asyncio.create_task(proactive_patrol_job(force=True))
         return JSONResponse({"ok": True})
 
