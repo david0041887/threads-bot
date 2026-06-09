@@ -306,7 +306,7 @@ async def _proactive_patrol_job_inner(force: bool = False):
         if not post.text or len(post.text) < 20:
             skip_reasons["文字太短"] += 1
             continue
-        if post.age_hours > PATROL_MAX_AGE_HOURS:
+        if post.age_hours != 9999 and post.age_hours > PATROL_MAX_AGE_HOURS:
             logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={post.age_hours}h")
             skip_reasons["太舊"] += 1
             continue
