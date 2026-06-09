@@ -369,9 +369,9 @@ async def _proactive_patrol_job_inner(force: bool = False):
                     f"回覆內容：\n{task.get('reply_text','')}"
                 )
             except Exception as e:
-                logger.warning(f"[海巡] API 回覆失敗 @{task.get('username')}: {e}")
+                logger.warning(f"[海巡] API 回覆失敗 @{task.get('username')} post_id={real_id}: {e}")
                 if force:
-                    send_telegram(f"⚠️ 海巡回覆失敗 @{task.get('username')}：{e}")
+                    send_telegram(f"⚠️ 海巡回覆失敗 @{task.get('username')}\npost_id={real_id}\n{e}")
     finally:
         client.close()
 

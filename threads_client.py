@@ -268,9 +268,11 @@ class ThreadsClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("media_id", "")
+            media_id = data.get("media_id", "")
+            logger.info(f"oEmbed {post_url} → media_id={media_id!r} raw={list(data.keys())}")
+            return media_id
         except Exception as e:
-            logger.debug(f"oEmbed 查詢失敗 {post_url}: {e}")
+            logger.info(f"oEmbed 查詢失敗 {post_url}: {e}")
             return ""
 
     def search_posts(self, keyword: str, limit: int = 20) -> list:
