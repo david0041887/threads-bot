@@ -266,30 +266,38 @@ async def proactive_patrol_job(force: bool = False):
 
     # Phase 1：一個 browser session 完成搜尋 + Claude 生成 + UI 回覆
     try:
-        # search_and_reply_async 會先搜尋並回傳貼文清單；reply_tasks 初始為空
         search_result = await search_and_reply_async(keyword=keyword, reply_tasks=[], search_mode=search_mode)
         results = search_result.get("posts", [])
     except Exception as e:
         logger.error(f"[海巡] 爬蟲搜尋失敗: {e}")
-        _notify_error_throttled("patrol_search", str(e))
+        if force:
+            send_telegram(f"❌ 海巡搜尋失敗（關鍵字：{keyword}）\n{e}")
+        else:
+            _notify_error_throttled("patrol_search", str(e))
         return
 
     if not results:
         logger.info(f"[海巡] 關鍵字「{keyword}」無搜尋結果")
+        if force:
+            send_telegram(f"🔍 手動海巡完成\n關鍵字：{keyword}（{search_mode}）\n搜尋結果：0 篇")
         return
 
     random.shuffle(results)
 
     reply_tasks = []
+    skip_reasons = {"已處理": 0, "文字太短": 0, "太舊": 0, "AI跳過": 0}
     for post in results:
         if len(reply_tasks) >= batch:
             break
         if state.is_processed("proactive", post.shortcode):
+            skip_reasons["已處理"] += 1
             continue
         if not post.text or len(post.text) < 20:
+            skip_reasons["文字太短"] += 1
             continue
         if post.age_hours > PATROL_MAX_AGE_HOURS:
             logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={post.age_hours}h")
+            skip_reasons["太舊"] += 1
             continue
         reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
         reply_type = "insurance"
@@ -298,6 +306,7 @@ async def proactive_patrol_job(force: bool = False):
             reply_type = "reaction"
         logger.info(f"[海巡] @{post.username} type={reply_type} reply_len={len(reply_text)} preview={reply_text[:40]!r}")
         if not reply_text:
+            skip_reasons["AI跳過"] += 1
             continue
         state.mark_processed("proactive", post.shortcode)
         reply_tasks.append({
@@ -311,7 +320,13 @@ async def proactive_patrol_job(force: bool = False):
     if not reply_tasks:
         logger.info("[海巡] 無合適貼文可回覆")
         if force:
-            send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇，無合適內容可回覆")
+            reason_str = " / ".join(f"{k}:{v}" for k, v in skip_reasons.items() if v > 0)
+            send_telegram(
+                f"🔍 手動海巡完成\n"
+                f"關鍵字：{keyword}（{search_mode}）\n"
+                f"搜到 {len(results)} 篇 → 全部跳過\n"
+                f"原因：{reason_str or '不明'}"
+            )
         return
 
     # Phase 2：用新的 browser session 做 UI 回覆（帶 reply_tasks，跳過搜尋）
