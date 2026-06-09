@@ -353,6 +353,15 @@ async def _proactive_patrol_job_inner(force: bool = False):
                 logger.warning(f"[海巡] 無法取得 post_id，跳過 @{task.get('username')}")
                 continue
             logger.info(f"[海巡] 回覆 @{task['username']} post_id={real_id}")
+            # 先驗證 post_id 是否真實存在於 Threads API
+            try:
+                verify = client._get(real_id, {"fields": "id,text"})
+                logger.info(f"[海巡] post_id 驗證 OK: {verify.get('id')} text={verify.get('text','')[:30]!r}")
+            except Exception as ve:
+                logger.warning(f"[海巡] post_id={real_id} 驗證失敗（ID 可能不正確）: {ve}")
+                if force:
+                    send_telegram(f"⚠️ post_id 驗證失敗 @{task.get('username')}\npost_id={real_id}\n{ve}")
+                continue
             try:
                 client.create_post(text=task["reply_text"], reply_to_id=real_id)
                 replied_n += 1
