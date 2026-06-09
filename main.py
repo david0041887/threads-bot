@@ -322,6 +322,7 @@ async def _proactive_patrol_job_inner(force: bool = False):
         state.mark_processed("proactive", post.shortcode)
         reply_tasks.append({
             "shortcode": post.shortcode,
+            "post_id": post.id,       # 用於 API 回覆
             "username": post.username,
             "text": post.text,
             "reply_text": reply_text,
@@ -340,34 +341,39 @@ async def _proactive_patrol_job_inner(force: bool = False):
             )
         return
 
-    # Phase 2：用新的 browser session 做 UI 回覆（帶 reply_tasks，跳過搜尋）
+    # Phase 2：用 Threads API 直接回覆（不需要瀏覽器，更穩定）
+    client = get_client()
+    replied_n = 0
     try:
-        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks, skip_search=True, search_mode=search_mode)
-        for sc in result.get("replied", []):
-            if not force:
-                _bump_count(session)
-            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
-            logger.info(f"[海巡] UI 回覆成功 @{task.get('username')} shortcode={sc}")
-            rtype = task.get("reply_type", "insurance")
-            label = "🧠 知識型" if rtype == "insurance" else "👋 曝光型"
-            send_telegram(
-                f"🔍 海巡回覆通知 {label}\n"
-                f"關鍵字：{keyword}\n"
-                f"@{task.get('username')}：{task.get('text','')[:80]}...\n"
-                f"─────────────\n"
-                f"回覆內容：\n{task.get('reply_text','')}"
-            )
-        for sc in result.get("failed", []):
-            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
-            logger.warning(f"[海巡] UI 回覆失敗 @{task.get('username')} shortcode={sc}")
-        if force:
-            replied_n = len(result.get("replied", []))
-            send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 發出 {replied_n} 則")
-    except Exception as e:
-        logger.error(f"[海巡] search_and_reply 失敗: {e}")
-        _notify_error_throttled("patrol_reply", str(e))
-        if force:
-            send_telegram(f"❌ 海巡執行失敗：{e}")
+        for task in reply_tasks:
+            post_id = task.get("post_id", "")
+            if not post_id:
+                logger.warning(f"[海巡] 無 post_id，跳過 @{task.get('username')}")
+                continue
+            try:
+                client.create_post(text=task["reply_text"], reply_to_id=post_id)
+                replied_n += 1
+                if not force:
+                    _bump_count(session)
+                rtype = task.get("reply_type", "insurance")
+                label = "🧠 知識型" if rtype == "insurance" else "👋 曝光型"
+                logger.info(f"[海巡] API 回覆成功 @{task.get('username')}")
+                send_telegram(
+                    f"🔍 海巡回覆通知 {label}\n"
+                    f"關鍵字：{keyword}\n"
+                    f"@{task.get('username')}：{task.get('text','')[:80]}...\n"
+                    f"─────────────\n"
+                    f"回覆內容：\n{task.get('reply_text','')}"
+                )
+            except Exception as e:
+                logger.warning(f"[海巡] API 回覆失敗 @{task.get('username')}: {e}")
+                if force:
+                    send_telegram(f"⚠️ 海巡回覆失敗 @{task.get('username')}：{e}")
+    finally:
+        client.close()
+
+    if force:
+        send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 發出 {replied_n} 則")
 
 
 async def refresh_token_job():
