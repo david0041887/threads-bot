@@ -341,51 +341,34 @@ async def _proactive_patrol_job_inner(force: bool = False):
             )
         return
 
-    # Phase 2：用 Threads API 直接回覆（不需要瀏覽器，更穩定）
-    client = get_client()
-    replied_n = 0
+    # Phase 2：Playwright UI 回覆
     try:
-        for task in reply_tasks:
-            # 優先用 oEmbed 取得真實 media_id，避免 shortcode 換算偏差
-            post_url = f"https://www.threads.com/@{task['username']}/post/{task['shortcode']}"
-            real_id = client.get_post_id_from_url(post_url) or task.get("post_id", "")
-            if not real_id:
-                logger.warning(f"[海巡] 無法取得 post_id，跳過 @{task.get('username')}")
-                continue
-            logger.info(f"[海巡] 回覆 @{task['username']} post_id={real_id}")
-            # 先驗證 post_id 是否真實存在於 Threads API
-            try:
-                verify = client._get(real_id, {"fields": "id,text"})
-                logger.info(f"[海巡] post_id 驗證 OK: {verify.get('id')} text={verify.get('text','')[:30]!r}")
-            except Exception as ve:
-                logger.warning(f"[海巡] post_id={real_id} 驗證失敗（ID 可能不正確）: {ve}")
-                if force:
-                    send_telegram(f"⚠️ post_id 驗證失敗 @{task.get('username')}\npost_id={real_id}\n{ve}")
-                continue
-            try:
-                client.create_post(text=task["reply_text"], reply_to_id=real_id)
-                replied_n += 1
-                if not force:
-                    _bump_count(session)
-                rtype = task.get("reply_type", "insurance")
-                label = "🧠 知識型" if rtype == "insurance" else "👋 曝光型"
-                logger.info(f"[海巡] API 回覆成功 @{task.get('username')}")
-                send_telegram(
-                    f"🔍 海巡回覆通知 {label}\n"
-                    f"關鍵字：{keyword}\n"
-                    f"@{task.get('username')}：{task.get('text','')[:80]}...\n"
-                    f"─────────────\n"
-                    f"回覆內容：\n{task.get('reply_text','')}"
-                )
-            except Exception as e:
-                logger.warning(f"[海巡] API 回覆失敗 @{task.get('username')} post_id={real_id}: {e}")
-                if force:
-                    send_telegram(f"⚠️ 海巡回覆失敗 @{task.get('username')}\npost_id={real_id}\n{e}")
-    finally:
-        client.close()
-
-    if force:
-        send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 發出 {replied_n} 則")
+        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks, skip_search=True, search_mode=search_mode)
+        replied_n = len(result.get("replied", []))
+        for sc in result.get("replied", []):
+            if not force:
+                _bump_count(session)
+            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
+            rtype = task.get("reply_type", "insurance")
+            label = "🧠 知識型" if rtype == "insurance" else "👋 曝光型"
+            logger.info(f"[海巡] UI 回覆成功 @{task.get('username')}")
+            send_telegram(
+                f"🔍 海巡回覆通知 {label}\n"
+                f"關鍵字：{keyword}\n"
+                f"@{task.get('username')}：{task.get('text','')[:80]}...\n"
+                f"─────────────\n"
+                f"回覆內容：\n{task.get('reply_text','')}"
+            )
+        for sc in result.get("failed", []):
+            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
+            logger.warning(f"[海巡] UI 回覆失敗 @{task.get('username')}")
+        if force:
+            send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 發出 {replied_n} 則")
+    except Exception as e:
+        logger.error(f"[海巡] search_and_reply 失敗: {e}")
+        _notify_error_throttled("patrol_reply", str(e))
+        if force:
+            send_telegram(f"❌ 海巡 Phase2 失敗：{e}")
 
 
 async def refresh_token_job():
