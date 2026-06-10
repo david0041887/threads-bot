@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import state
 from threads_client import ThreadsClient
-from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction
+from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction, generate_post_angles
 from notifier import notify_error, notify_reply_for_approval, send_telegram
 
 logging.basicConfig(
@@ -460,6 +460,36 @@ async def telegram_message_handler(request: Request):
     if text in ("海巡測試", "手動海巡"):
         send_telegram("🔍 手動海巡啟動，結果將通知你（如 3 分鐘後沒有回報，請查 Railway log）")
         asyncio.create_task(proactive_patrol_job(force=True))
+        return JSONResponse({"ok": True})
+
+    # ── 有感：素材→角度 ───────────────────────────────
+    if text.startswith("有感") and len(text) > 3:
+        seed = text[2:].strip().lstrip("：:").strip()
+        if not seed:
+            send_telegram("💡 用法：有感 [你的觀察或客戶狀況]\n例：有感 客戶保費繳了15年，受益人還是前配偶")
+            return JSONResponse({"ok": True})
+        async def _gen_angles():
+            try:
+                send_telegram("💭 思考中...")
+                angles = generate_post_angles(seed)
+                if not angles:
+                    send_telegram("❌ 角度生成失敗，請再試一次")
+                    return
+                lines = [f"💡 3 個發文角度\n素材：{seed[:60]}\n"]
+                labels = {"骨架A反差": "A", "骨架C微故事": "C", "骨架D客戶案例": "D",
+                          "骨架E引流": "E", "kyle生活場景": "🏙", "kyle嘲諷觀察": "😏"}
+                for i, a in enumerate(angles, 1):
+                    t = a.get("type", "")
+                    label = labels.get(t, t)
+                    lines.append(f"[{i}] {label} {t}")
+                    lines.append(f"開場：{a.get('opening', '')}")
+                    lines.append(f"核心：{a.get('core', '')}")
+                    lines.append("")
+                lines.append("選一個，自己寫剩下的部分")
+                send_telegram("\n".join(lines))
+            except Exception as e:
+                send_telegram(f"❌ 失敗：{e}")
+        asyncio.create_task(_gen_angles())
         return JSONResponse({"ok": True})
 
     # ── 手動產生主題 ──────────────────────────────────

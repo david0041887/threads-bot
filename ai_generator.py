@@ -1089,6 +1089,42 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
         return ""
 
 
+def generate_post_angles(seed: str) -> list[dict]:
+    """
+    從一個真實觀察/客戶經驗（素材），生成 3 個不同的發文角度。
+    每個角度含：type（骨架）、opening（開場句）、core（核心衝突）。
+    """
+    system = f"""{ACCOUNT_PERSONA}
+
+你收到一個真實的觀察或客戶經驗（素材）。
+
+任務：從這個素材出發，提出 3 個完全不同的發文角度。
+
+每個角度包含：
+- type: 骨架類型（骨架A反差 / 骨架C微故事 / 骨架D客戶案例 / 骨架E引流 / kyle生活場景 / kyle嘲諷觀察）
+- opening: 這篇的第一句話（就是貼文開場白，10~25字，不加句點，不加引號）
+- core: 核心衝突或翻轉點（一句話說清楚這篇的「戲」在哪，讓作者知道要怎麼寫）
+
+規則：
+- 3 個角度必須完全不同，不是同一件事說三遍
+- 至少一個用 kyle 風格（哲學場景 / 嘲諷觀察）
+- 至少一個有具體知識點（數字、條款、實務細節）
+- opening 要讓人停下來想繼續讀，不能是廢話開頭
+- 不是完整草稿，只是讓作者決定方向用的
+
+輸出嚴格為 JSON array，3 個物件，不加任何說明：
+[{{"type":"...","opening":"...","core":"..."}}]"""
+
+    user = f"素材：{seed}"
+    try:
+        raw = _call_claude(system, user, max_tokens=600)
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except Exception as e:
+        logger.error(f"角度生成失敗: {e}")
+        return []
+
+
 def generate_short_reaction(post_text: str) -> str:
     """
     曝光型短反應：不注入保險知識，只留一句呼應貼文的自然反應。
