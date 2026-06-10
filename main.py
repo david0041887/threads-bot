@@ -612,6 +612,20 @@ async def patrol_stats():
     return {"daily_count": _get_counts()}
 
 
+@app.get("/admin/my-posts")
+async def my_posts(limit: int = 10):
+    """取得帳號最新貼文內容"""
+    client = get_client()
+    try:
+        posts = client.get_my_posts(limit=limit)
+        return [
+            {"index": i+1, "timestamp": p.timestamp, "permalink": p.permalink, "text": p.text}
+            for i, p in enumerate(posts)
+        ]
+    finally:
+        client.close()
+
+
 @app.get("/admin/stats")
 async def admin_stats():
     """Bot 整體狀態快照 — 給人看的儀表板。"""
