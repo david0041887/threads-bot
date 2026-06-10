@@ -33,7 +33,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 try:
-    from threads_scraper import search_threads_by_keyword_async, search_and_reply_async
+    from threads_scraper import search_threads_by_keyword_async, search_and_reply_async, get_profile_posts_async
     PLAYWRIGHT_AVAILABLE = True
 except Exception:
     PLAYWRIGHT_AVAILABLE = False
@@ -614,7 +614,7 @@ async def patrol_stats():
 
 @app.get("/admin/my-posts")
 async def my_posts(limit: int = 10):
-    """取得帳號最新貼文內容"""
+    """取得自己帳號最新貼文內容"""
     client = get_client()
     try:
         posts = client.get_my_posts(limit=limit)
@@ -624,6 +624,18 @@ async def my_posts(limit: int = 10):
         ]
     finally:
         client.close()
+
+
+@app.get("/admin/user-posts")
+async def user_posts(username: str, limit: int = 50):
+    """用 Playwright 擷取指定帳號的公開貼文"""
+    if not PLAYWRIGHT_AVAILABLE:
+        return {"error": "Playwright 不可用"}
+    posts = await get_profile_posts_async(username=username, limit=limit)
+    return [
+        {"index": i+1, "shortcode": p.shortcode, "username": p.username, "text": p.text}
+        for i, p in enumerate(posts)
+    ]
 
 
 @app.get("/admin/stats")

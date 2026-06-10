@@ -330,6 +330,94 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
             await browser.close()
 
 
+async def get_profile_posts_async(username: str, limit: int = 50) -> list[ScrapedPost]:
+    """擷取指定帳號的公開貼文列表（需要登入 cookie）"""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+        )
+        page = await context.new_page()
+
+        try:
+            if not await _ensure_logged_in(page, context):
+                logger.error("[Profile] 未登入，無法擷取")
+                return []
+
+            profile_url = f"https://www.threads.com/@{username}"
+            logger.info(f"[Profile] 前往 {profile_url}")
+            await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
+
+            # 向下滾動載入更多貼文（每次滾動後等待 1.5s）
+            scroll_rounds = max(5, limit // 5)
+            for i in range(scroll_rounds):
+                await page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
+                await asyncio.sleep(1.5)
+
+            my_username = os.environ.get("THREADS_USERNAME", "").lower()
+            post_links = await page.query_selector_all('a[href*="/post/"]')
+            logger.info(f"[Profile] 找到 {len(post_links)} 個貼文連結")
+
+            posts: list[ScrapedPost] = []
+            seen: set[str] = set()
+
+            for link_el in post_links[:limit * 3]:
+                try:
+                    href = await link_el.get_attribute("href") or ""
+                    m = re.search(r"/post/([A-Za-z0-9_-]+)", href)
+                    if not m:
+                        continue
+                    sc = m.group(1)
+                    if sc in seen:
+                        continue
+                    seen.add(sc)
+
+                    result = await link_el.evaluate("""el => {
+                        let node = el, text = '', uname = '';
+                        for (let i = 0; i < 15; i++) {
+                            node = node.parentElement; if (!node) break;
+                            const t = (node.innerText||'').trim();
+                            if (!text && t.length > 30) text = t.slice(0,800);
+                        }
+                        node = el;
+                        for (let i = 0; i < 15; i++) {
+                            node = node.parentElement; if (!node) break;
+                            const u = node.querySelector('a[href^="/@"]');
+                            if (u) { uname=(u.getAttribute('href')||'').replace(/^\\/@/,'').split('/')[0]; break; }
+                        }
+                        return {text, username: uname};
+                    }""")
+
+                    raw_text = (result.get("text") or "").strip()
+                    uname = (result.get("username") or "").strip()
+                    if not raw_text or len(raw_text) < 20:
+                        continue
+                    text, age_hours = _parse_post_text(raw_text)
+                    posts.append(ScrapedPost(shortcode=sc, text=text, username=uname, age_hours=age_hours))
+                    if len(posts) >= limit:
+                        break
+                except Exception:
+                    pass
+
+            logger.info(f"[Profile] @{username} 共擷取 {len(posts)} 篇")
+            return posts
+
+        except Exception as e:
+            logger.error(f"[Profile] 擷取失敗: {e}")
+            return []
+        finally:
+            await browser.close()
+
+
 async def _dump_page_elements(page) -> str:
     """擷取頁面上的互動元素，用於診斷 UI 選擇器。"""
     try:
