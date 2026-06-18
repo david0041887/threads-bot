@@ -52,6 +52,16 @@ def init_db() -> None:
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS viral_posts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                shortcode   TEXT NOT NULL UNIQUE,
+                keyword     TEXT NOT NULL,
+                username    TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                permalink   TEXT,
+                found_at    INTEGER NOT NULL,
+                analysis    TEXT
+            );
         """)
     _migrate_legacy_json()
     logger.info(f"state.py: DB ready at {_DB_PATH}")
@@ -268,6 +278,53 @@ def count_pending_replies() -> int:
         ).fetchone()
     return row["c"]
 
+
+# ─── 爆文（viral_posts）────────────────────────────────────────
+
+def save_viral_post(
+    shortcode: str, keyword: str, username: str,
+    text: str, permalink: str, analysis: dict = None
+) -> bool:
+    """儲存爆文；已存在則跳過。回傳 True 表示是新紀錄。"""
+    try:
+        with _conn() as c:
+            c.execute(
+                """INSERT OR IGNORE INTO viral_posts
+                   (shortcode, keyword, username, text, permalink, found_at, analysis)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (shortcode, keyword, username, text, permalink,
+                 int(time.time()), json.dumps(analysis or {}, ensure_ascii=False)),
+            )
+            changed = c.execute("SELECT changes()").fetchone()[0]
+        return changed > 0
+    except Exception as e:
+        logger.error(f"save_viral_post error: {e}")
+        return False
+
+
+def get_viral_posts(limit: int = 50) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM viral_posts ORDER BY found_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["analysis"] = json.loads(d["analysis"] or "{}")
+        except Exception:
+            d["analysis"] = {}
+        result.append(d)
+    return result
+
+
+def count_viral_posts() -> int:
+    with _conn() as c:
+        row = c.execute("SELECT COUNT(*) AS c FROM viral_posts").fetchone()
+    return row["c"]
+
+
+# ─── TTL 清理 ─────────────────────────────────────────────────
 
 def cleanup_old_processed_ids(days: int = 90) -> int:
     cutoff = int(time.time()) - days * 86400

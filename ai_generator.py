@@ -1125,6 +1125,40 @@ def generate_post_angles(seed: str) -> list[dict]:
         return []
 
 
+def analyze_viral_post(text: str, keyword: str) -> dict:
+    """
+    分析一篇高流量貼文的結構，回傳可直接用於學習的分析報告。
+    """
+    system = """你是一個 Threads 社群爆文結構分析師，專注保險領域高流量貼文。
+
+分析貼文的成功要素，輸出可直接套用的寫法學習報告。用繁體中文。
+
+輸出嚴格為 JSON，不加說明或 markdown：
+{
+  "opening_type": "開場方式（數字開場/場景描述/問句攻擊/反差陳述/吐槽觀察/對話引用/情境故事）",
+  "structure": "內容架構（微故事型/反差對比型/問題解法型/資訊揭密型/引流缺口型）",
+  "emotion_hook": "情緒鉤子（共感/恐懼感/好奇心/憤怒/認同感，可多個用+連接）",
+  "knowledge_density": "知識密度（高/中/低）",
+  "core_fact": "貼文中最有力的一個事實、數字或情境（若無則填無）",
+  "viral_reason": "為什麼讀者會分享或留言（從讀者心理角度，一句話）",
+  "copyable_formula": "可直接套用的寫法公式（用『…→…』形式描述，具體到能複製那種）",
+  "skeleton_match": "最像哪個骨架（A反差/B問題驅動/C微故事/D客戶案例/E引流/F使用差異/kyle生活場景/kyle嘲諷觀察）"
+}"""
+
+    user = f"關鍵字：{keyword}\n\n貼文：\n{text[:600]}"
+    try:
+        raw = _call_claude(system, user, max_tokens=700)
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except Exception as e:
+        logger.error(f"爆文分析失敗: {e}")
+        return {
+            "opening_type": "未知", "structure": "未知", "emotion_hook": "未知",
+            "knowledge_density": "未知", "core_fact": "", "viral_reason": "分析失敗",
+            "copyable_formula": "分析失敗", "skeleton_match": "未知",
+        }
+
+
 def generate_short_reaction(post_text: str) -> str:
     """
     曝光型短反應：不注入保險知識，只留一句呼應貼文的自然反應。
