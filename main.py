@@ -144,15 +144,13 @@ def _ensure_chromium():
 async def lifespan(app: FastAPI):
     state.init_db()
     _ensure_chromium()
-    scheduler.add_job(daily_draft_job, CronTrigger(hour=8, minute=0, timezone="Asia/Taipei"), args=["morning"], id="daily_draft_morning", replace_existing=True)
-    scheduler.add_job(daily_draft_job, CronTrigger(hour=19, minute=0, timezone="Asia/Taipei"), args=["evening"], id="daily_draft_evening", replace_existing=True)
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_processed_ids(days=90), CronTrigger(day_of_week="sun", hour=4, minute=30, timezone="Asia/Taipei"), id="processed_ids_cleanup", replace_existing=True)
     # 依 state 裡的 flag 決定海巡 / 留言輪詢是否啟動（跨部署記住）
     if state.get_kv("schedulers_enabled", False):
         scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-        scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
+        scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=10), id="proactive_patrol", replace_existing=True)
         logger.info("[持久化] schedulers_enabled=True，海巡 / 留言輪詢已自動啟動")
     scheduler.start()
     logger.info("Scheduler 啟動")
@@ -251,31 +249,25 @@ async def proactive_patrol_job(force: bool = False):
 
 async def _proactive_patrol_job_inner(force: bool = False):
     reset_daily_count()
-    session = get_current_session()
-    if not session:
-        if not force:
-            return
-        session = "noon"  # force 模式沿用午間場配額
 
-    quota = PATROL_SCHEDULE[session]["count"]
-    used = _get_counts().get(session, 0)
-    if used >= quota and not force:
-        logger.info(f"[海巡] {session} 時段配額已用完 ({used}/{quota})")
+    # 只在 07:00–00:00 Taipei 執行（force 模式不受限）
+    from datetime import datetime
+    import pytz
+    h = datetime.now(pytz.timezone("Asia/Taipei")).hour
+    if not force and not (7 <= h < 24):
         return
 
-    batch = 2 if force else min(2, quota - used)
     keyword = random.choice(SEARCH_KEYWORDS)
-    # 40% 機率搜熱門貼文，60% 搜最新
-    search_mode = "top" if random.random() < 0.4 else "recent"
-    logger.info(f"[海巡] 搜尋關鍵字：{keyword}，模式：{search_mode}，本批次：{batch} 則")
+    # 20% 機率搜熱門，80% 搜最新（以發現最新貼文為主）
+    search_mode = "top" if random.random() < 0.2 else "recent"
+    logger.info(f"[海巡] 搜尋關鍵字：{keyword}，模式：{search_mode}")
 
     if not PLAYWRIGHT_AVAILABLE:
-        logger.warning("[海巡] Playwright 不可用，跳過本次海巡")
         if force:
             send_telegram("❌ 海巡失敗：Playwright 不可用")
         return
 
-    # Phase 1：一個 browser session 完成搜尋 + Claude 生成 + UI 回覆
+    # ── Phase 1：搜尋 ───────────────────────────────────
     try:
         search_result = await search_and_reply_async(keyword=keyword, reply_tasks=[], search_mode=search_mode)
         results = search_result.get("posts", [])
@@ -288,41 +280,76 @@ async def _proactive_patrol_job_inner(force: bool = False):
         return
 
     if not results:
-        logger.info(f"[海巡] 關鍵字「{keyword}」無搜尋結果")
         if force:
             send_telegram(f"🔍 手動海巡完成\n關鍵字：{keyword}（{search_mode}）\n搜尋結果：0 篇")
         return
 
     random.shuffle(results)
 
-    reply_tasks = []
-    skip_reasons = {"已處理": 0, "文字太短": 0, "太舊": 0, "AI跳過": 0}
+    # ── Phase 2：過濾 → 推播新貼文給用戶 ───────────────
+    new_posts = []
+    skip_old = 0
     for post in results:
-        if len(reply_tasks) >= batch:
-            break
         if state.is_processed("proactive", post.shortcode):
-            skip_reasons["已處理"] += 1
             continue
         if not post.text or len(post.text) < 20:
-            skip_reasons["文字太短"] += 1
             continue
         if post.age_hours != 9999 and post.age_hours > PATROL_MAX_AGE_HOURS:
-            logger.info(f"[海巡] 跳過過舊貼文 @{post.username} age={post.age_hours}h")
-            skip_reasons["太舊"] += 1
+            skip_old += 1
             continue
+        new_posts.append(post)
+        if len(new_posts) >= 3:
+            break
+
+    if not new_posts:
+        logger.info(f"[海巡] 關鍵字「{keyword}」無新貼文（舊:{skip_old}）")
+        if force:
+            send_telegram(
+                f"🔍 手動海巡完成\n"
+                f"關鍵字：{keyword}（{search_mode}）\n"
+                f"搜到 {len(results)} 篇 → 無新貼文（太舊:{skip_old}）"
+            )
+        return
+
+    # 推播發現的新貼文
+    lines = [f"📡 海巡｜「{keyword}」({search_mode})", ""]
+    for i, post in enumerate(new_posts, 1):
+        age_str = f" · {int(post.age_hours)}h前" if post.age_hours != 9999 else ""
+        lines.append(f"[{i}] @{post.username}{age_str}")
+        lines.append(post.text[:150] + ("…" if len(post.text) > 150 else ""))
+        if post.shortcode:
+            lines.append(f"https://www.threads.com/t/{post.shortcode}")
+        lines.append("")
+    send_telegram("\n".join(lines).strip())
+
+    # 標記已處理（避免重複推播）
+    for post in new_posts:
+        state.mark_processed("proactive", post.shortcode)
+
+    # ── Phase 3：自動回覆（只在指定時段 + 有配額）───────
+    session = get_current_session()
+    if not session and not force:
+        return
+    if force:
+        session = session or "noon"
+
+    quota = PATROL_SCHEDULE[session]["count"]
+    used = _get_counts().get(session, 0)
+    if used >= quota and not force:
+        return
+
+    reply_tasks = []
+    for post in new_posts[:1]:  # 每次最多嘗試回覆 1 篇
         reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
         reply_type = "insurance"
         if not reply_text:
             reply_text = generate_short_reaction(post.text)
             reply_type = "reaction"
-        logger.info(f"[海巡] @{post.username} type={reply_type} reply_len={len(reply_text)} preview={reply_text[:40]!r}")
         if not reply_text:
-            skip_reasons["AI跳過"] += 1
             continue
-        state.mark_processed("proactive", post.shortcode)
         reply_tasks.append({
             "shortcode": post.shortcode,
-            "post_id": post.id,       # 用於 API 回覆
+            "post_id": post.id,
             "username": post.username,
             "text": post.text,
             "reply_text": reply_text,
@@ -330,21 +357,10 @@ async def _proactive_patrol_job_inner(force: bool = False):
         })
 
     if not reply_tasks:
-        logger.info("[海巡] 無合適貼文可回覆")
-        if force:
-            reason_str = " / ".join(f"{k}:{v}" for k, v in skip_reasons.items() if v > 0)
-            send_telegram(
-                f"🔍 手動海巡完成\n"
-                f"關鍵字：{keyword}（{search_mode}）\n"
-                f"搜到 {len(results)} 篇 → 全部跳過\n"
-                f"原因：{reason_str or '不明'}"
-            )
         return
 
-    # Phase 2：Playwright UI 回覆
     try:
         result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks, skip_search=True, search_mode=search_mode)
-        replied_n = len(result.get("replied", []))
         for sc in result.get("replied", []):
             if not force:
                 _bump_count(session)
@@ -353,22 +369,19 @@ async def _proactive_patrol_job_inner(force: bool = False):
             label = "🧠 知識型" if rtype == "insurance" else "👋 曝光型"
             logger.info(f"[海巡] UI 回覆成功 @{task.get('username')}")
             send_telegram(
-                f"🔍 海巡回覆通知 {label}\n"
-                f"關鍵字：{keyword}\n"
-                f"@{task.get('username')}：{task.get('text','')[:80]}...\n"
-                f"─────────────\n"
-                f"回覆內容：\n{task.get('reply_text','')}"
+                f"✅ 海巡已回覆 {label}\n"
+                f"@{task.get('username')}：{task.get('text','')[:60]}…\n"
+                f"─────\n"
+                f"回覆：{task.get('reply_text','')}"
             )
-        for sc in result.get("failed", []):
-            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
-            logger.warning(f"[海巡] UI 回覆失敗 @{task.get('username')}")
         if force:
-            send_telegram(f"🔍 海巡完成（關鍵字：{keyword}）\n搜到 {len(results)} 篇 → 產生回覆 {len(reply_tasks)} 則 → 發出 {replied_n} 則")
+            replied_n = len(result.get("replied", []))
+            send_telegram(f"🔍 海巡完成（{keyword}）\n搜到 {len(results)} 篇 → 新貼文 {len(new_posts)} 則 → 回覆 {replied_n} 則")
     except Exception as e:
         logger.error(f"[海巡] search_and_reply 失敗: {e}")
         _notify_error_throttled("patrol_reply", str(e))
         if force:
-            send_telegram(f"❌ 海巡 Phase2 失敗：{e}")
+            send_telegram(f"❌ 海巡回覆失敗：{e}")
 
 
 async def refresh_token_job():
@@ -521,7 +534,7 @@ async def telegram_message_handler(request: Request):
     if text == "海巡繼續":
         try:
             scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-            scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=15), id="proactive_patrol", replace_existing=True)
+            scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=10), id="proactive_patrol", replace_existing=True)
             state.set_kv("schedulers_enabled", True)
             send_telegram("▶️ 海巡與留言回覆已恢復（狀態已保存，跨部署生效）")
         except Exception as e:
