@@ -51,6 +51,7 @@ SEARCH_KEYWORDS = [
 ]
 
 PATROL_MAX_AGE_HOURS = 1440  # 只回覆 60 天內的貼文（60×24）
+VIRAL_MIN_LIKES = 500        # 爆文最低 like 數（like=0 表示未知，不過濾）
 
 # 每日海巡配額
 PATROL_SCHEDULE = {
@@ -287,11 +288,19 @@ async def _proactive_patrol_job_inner(force: bool = False):
 
     random.shuffle(results)
 
+    if not results:
+        # 搜到 0 篇：可能是 cookie 過期，throttle 通知
+        _notify_error_throttled("patrol_empty", f"搜尋「{keyword}」回傳 0 篇，可能 Cookie 過期")
+        if force:
+            send_telegram(f"🔍 手動海巡完成\n關鍵字：{keyword}（{search_mode}）\n搜尋結果：0 篇（Cookie 可能過期）")
+        return
+
     # ── Phase 2：過濾 → 推播新貼文給用戶 ───────────────
+    # 使用獨立 namespace "patrol_push"，不受舊 auto-reply 記錄干擾
     new_posts = []
     skip_old = 0
     for post in results:
-        if state.is_processed("proactive", post.shortcode):
+        if state.is_processed("patrol_push", post.shortcode):
             continue
         if not post.text or len(post.text) < 20:
             continue
@@ -303,7 +312,7 @@ async def _proactive_patrol_job_inner(force: bool = False):
             break
 
     if not new_posts:
-        logger.info(f"[海巡] 關鍵字「{keyword}」無新貼文（舊:{skip_old}）")
+        logger.info(f"[海巡] 關鍵字「{keyword}」無新貼文（舊:{skip_old}，共搜到:{len(results)}）")
         if force:
             send_telegram(
                 f"🔍 手動海巡完成\n"
@@ -316,18 +325,19 @@ async def _proactive_patrol_job_inner(force: bool = False):
     lines = [f"📡 海巡｜「{keyword}」({search_mode})", ""]
     for i, post in enumerate(new_posts, 1):
         age_str = f" · {int(post.age_hours)}h前" if post.age_hours != 9999 else ""
-        lines.append(f"[{i}] @{post.username}{age_str}")
+        like_str = f" · ❤️{post.like_count}" if post.like_count > 0 else ""
+        lines.append(f"[{i}] @{post.username}{age_str}{like_str}")
         lines.append(post.text[:150] + ("…" if len(post.text) > 150 else ""))
         if post.shortcode:
             lines.append(f"https://www.threads.com/t/{post.shortcode}")
         lines.append("")
     send_telegram("\n".join(lines).strip())
 
-    # 標記已處理（避免重複推播）
+    # 標記已推播（patrol_push namespace，避免重複推）
     for post in new_posts:
-        state.mark_processed("proactive", post.shortcode)
+        state.mark_processed("patrol_push", post.shortcode)
 
-    # ── Phase 3：自動回覆（只在指定時段 + 有配額）───────
+    # ── Phase 3：自動回覆（只在指定時段 + 有配額 + 未回覆過）───
     session = get_current_session()
     if not session and not force:
         return
@@ -341,6 +351,8 @@ async def _proactive_patrol_job_inner(force: bool = False):
 
     reply_tasks = []
     for post in new_posts[:1]:  # 每次最多嘗試回覆 1 篇
+        if state.is_processed("proactive", post.shortcode):  # 已回覆過則跳過
+            continue
         reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
         reply_type = "insurance"
         if not reply_text:
@@ -348,6 +360,7 @@ async def _proactive_patrol_job_inner(force: bool = False):
             reply_type = "reaction"
         if not reply_text:
             continue
+        state.mark_processed("proactive", post.shortcode)  # 標記為已回覆
         reply_tasks.append({
             "shortcode": post.shortcode,
             "post_id": post.id,
@@ -408,11 +421,15 @@ async def _hunt_viral_posts_inner(force: bool = False):
     candidates = []
     for keyword in keywords:
         try:
-            results = await search_threads_by_keyword_async(keyword=keyword, limit=10, search_mode="top")
+            results = await search_threads_by_keyword_async(keyword=keyword, limit=15, search_mode="top")
             for post in results:
                 if not post.text or len(post.text) < 40:
                     continue
                 if state.is_processed("viral", post.shortcode):
+                    continue
+                # like_count=0 表示 API 未回傳（可能很高，保留）；有數字但 < 門檻則過濾
+                if post.like_count > 0 and post.like_count < VIRAL_MIN_LIKES:
+                    logger.info(f"[爆文獵手] 跳過低流量 @{post.username} like={post.like_count}")
                     continue
                 candidates.append((keyword, post))
         except Exception as e:
@@ -470,9 +487,10 @@ async def _hunt_viral_posts_inner(force: bool = False):
 
     # 每篇各發一則 TG（避免超過 4096 字元限制）
     for i, (keyword, post, analysis) in enumerate(analyzed, 1):
+        like_str = f" · ❤️{post.like_count:,}" if post.like_count > 0 else " · ❤️未知"
         lines = [
             f"🔥 爆文分析 [{i}/{len(analyzed)}]",
-            f"🔍 「{keyword}」· @{post.username}",
+            f"🔍 「{keyword}」· @{post.username}{like_str}",
             "",
             post.text[:200] + ("…" if len(post.text) > 200 else ""),
             "",
@@ -483,11 +501,11 @@ async def _hunt_viral_posts_inner(force: bool = False):
         if analysis.get("core_fact") and analysis["core_fact"] != "無":
             lines.append(f"核心事實：{analysis.get('core_fact','')}")
         lines += [
-            f"",
+            "",
             f"💡 為什麼爆：{analysis.get('viral_reason','')}",
             f"✏️ 可複製公式：{analysis.get('copyable_formula','')}",
             f"骨架：{analysis.get('skeleton_match','')}",
-            f"",
+            "",
             f"https://www.threads.com/t/{post.shortcode}",
         ]
         send_telegram("\n".join(lines))

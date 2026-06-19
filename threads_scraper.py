@@ -40,6 +40,7 @@ class ScrapedPost:
     username: str
     media_id: str = ""
     age_hours: int = 9999  # 貼文年齡（小時），9999=無法判斷
+    like_count: int = 0    # 0 = 未知（API 未回傳）
 
     @property
     def id(self) -> str:
@@ -178,6 +179,36 @@ def _extract_pk_map(json_text: str) -> dict[str, str]:
     return pk_map
 
 
+def _extract_like_map(json_text: str) -> dict[str, int]:
+    """從 API JSON 回應中提取 shortcode → like_count 對應表。"""
+    like_map: dict[str, int] = {}
+    like_pattern = re.compile(r'"like_count"\s*:\s*(\d+)')
+    window = 800
+
+    for m in re.finditer(r'"(?:code|shortcode)"\s*:\s*"([A-Za-z0-9_-]{6,15})"', json_text):
+        code = m.group(1)
+        start = max(0, m.start() - window)
+        end = min(len(json_text), m.end() + window)
+        snippet = json_text[start:end]
+        lm = like_pattern.search(snippet)
+        if lm:
+            lc = int(lm.group(1))
+            like_map[code] = max(like_map.get(code, 0), lc)
+
+    for m in re.finditer(r'/post/([A-Za-z0-9_-]{6,15})', json_text):
+        code = m.group(1)
+        if code in like_map:
+            continue
+        start = max(0, m.start() - window)
+        end = min(len(json_text), m.end() + window)
+        snippet = json_text[start:end]
+        lm = like_pattern.search(snippet)
+        if lm:
+            like_map[code] = int(lm.group(1))
+
+    return like_map
+
+
 async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_mode: str = "recent") -> list[ScrapedPost]:
     """search_mode: "recent"（最新）或 "top"（熱門/爆文）"""
     async with async_playwright() as p:
@@ -205,6 +236,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
         posts: list[ScrapedPost] = []
         # shortcode → 真實 media_id（從 API 回應攔截）
         api_pk_map: dict[str, str] = {}
+        api_like_map: dict[str, int] = {}
 
         async def _capture_pk(response):
             try:
@@ -212,7 +244,6 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                 if "json" not in ct and "javascript" not in ct:
                     return
                 body = await response.text()
-                # 只處理包含 post 資料特徵的回應
                 has_id = '"pk"' in body or ('"id"' in body and len(body) > 500)
                 has_code = '"code"' in body or '"shortcode"' in body or '/post/' in body
                 if has_id and has_code:
@@ -220,6 +251,9 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     if found:
                         logger.debug(f"[海巡] 從 {response.url[:60]} 捕捉到 {len(found)} 個 pk")
                         api_pk_map.update(found)
+                    likes = _extract_like_map(body)
+                    if likes:
+                        api_like_map.update(likes)
             except Exception:
                 pass
 
@@ -313,7 +347,11 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     if username.lower() == my_username:
                         continue
 
-                    posts.append(ScrapedPost(shortcode=shortcode, text=text, username=username, media_id=media_id, age_hours=age_hours))
+                    posts.append(ScrapedPost(
+                        shortcode=shortcode, text=text, username=username,
+                        media_id=media_id, age_hours=age_hours,
+                        like_count=api_like_map.get(shortcode, 0),
+                    ))
                     if len(posts) >= limit:
                         break
 
@@ -615,6 +653,7 @@ async def search_and_reply_async(
             # 搜尋（Phase 2 傳 skip_search=True 時跳過）
             if not skip_search:
                 api_pk_map: dict[str, str] = {}
+                api_like_map: dict[str, int] = {}
 
                 async def _capture_pk(response):
                     try:
@@ -628,6 +667,9 @@ async def search_and_reply_async(
                             found = _extract_pk_map(body)
                             if found:
                                 api_pk_map.update(found)
+                            likes = _extract_like_map(body)
+                            if likes:
+                                api_like_map.update(likes)
                     except Exception:
                         pass
 
@@ -687,7 +729,11 @@ async def search_and_reply_async(
                         text, age_hours = _parse_post_text(raw_text)
                         if not text or len(text) < 20 or username.lower() == my_username:
                             continue
-                        posts.append(ScrapedPost(shortcode=sc, text=text, username=username, media_id=media_id, age_hours=age_hours))
+                        posts.append(ScrapedPost(
+                            shortcode=sc, text=text, username=username,
+                            media_id=media_id, age_hours=age_hours,
+                            like_count=api_like_map.get(sc, 0),
+                        ))
                     except Exception:
                         pass
 
