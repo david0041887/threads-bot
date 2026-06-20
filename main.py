@@ -282,18 +282,13 @@ async def _proactive_patrol_job_inner(force: bool = False):
         return
 
     if not results:
-        if force:
-            send_telegram(f"🔍 手動海巡完成\n關鍵字：{keyword}（{search_mode}）\n搜尋結果：0 篇")
-        return
-
-    random.shuffle(results)
-
-    if not results:
         # 搜到 0 篇：可能是 cookie 過期，throttle 通知
         _notify_error_throttled("patrol_empty", f"搜尋「{keyword}」回傳 0 篇，可能 Cookie 過期")
         if force:
             send_telegram(f"🔍 手動海巡完成\n關鍵字：{keyword}（{search_mode}）\n搜尋結果：0 篇（Cookie 可能過期）")
         return
+
+    random.shuffle(results)
 
     # ── Phase 2：過濾 → 推播新貼文給用戶 ───────────────
     # 使用獨立 namespace "patrol_push"，不受舊 auto-reply 記錄干擾
@@ -336,66 +331,6 @@ async def _proactive_patrol_job_inner(force: bool = False):
     # 標記已推播（patrol_push namespace，避免重複推）
     for post in new_posts:
         state.mark_processed("patrol_push", post.shortcode)
-
-    # ── Phase 3：自動回覆（只在指定時段 + 有配額 + 未回覆過）───
-    session = get_current_session()
-    if not session and not force:
-        return
-    if force:
-        session = session or "noon"
-
-    quota = PATROL_SCHEDULE[session]["count"]
-    used = _get_counts().get(session, 0)
-    if used >= quota and not force:
-        return
-
-    reply_tasks = []
-    for post in new_posts[:1]:  # 每次最多嘗試回覆 1 篇
-        if state.is_processed("proactive", post.shortcode):  # 已回覆過則跳過
-            continue
-        reply_text = generate_proactive_reply(post_text=post.text, keyword=keyword)
-        reply_type = "insurance"
-        if not reply_text:
-            reply_text = generate_short_reaction(post.text)
-            reply_type = "reaction"
-        if not reply_text:
-            continue
-        state.mark_processed("proactive", post.shortcode)  # 標記為已回覆
-        reply_tasks.append({
-            "shortcode": post.shortcode,
-            "post_id": post.id,
-            "username": post.username,
-            "text": post.text,
-            "reply_text": reply_text,
-            "reply_type": reply_type,
-        })
-
-    if not reply_tasks:
-        return
-
-    try:
-        result = await search_and_reply_async(keyword=keyword, reply_tasks=reply_tasks, skip_search=True, search_mode=search_mode)
-        for sc in result.get("replied", []):
-            if not force:
-                _bump_count(session)
-            task = next((t for t in reply_tasks if t["shortcode"] == sc), {})
-            rtype = task.get("reply_type", "insurance")
-            label = "🧠 知識型" if rtype == "insurance" else "👋 曝光型"
-            logger.info(f"[海巡] UI 回覆成功 @{task.get('username')}")
-            send_telegram(
-                f"✅ 海巡已回覆 {label}\n"
-                f"@{task.get('username')}：{task.get('text','')[:60]}…\n"
-                f"─────\n"
-                f"回覆：{task.get('reply_text','')}"
-            )
-        if force:
-            replied_n = len(result.get("replied", []))
-            send_telegram(f"🔍 海巡完成（{keyword}）\n搜到 {len(results)} 篇 → 新貼文 {len(new_posts)} 則 → 回覆 {replied_n} 則")
-    except Exception as e:
-        logger.error(f"[海巡] search_and_reply 失敗: {e}")
-        _notify_error_throttled("patrol_reply", str(e))
-        if force:
-            send_telegram(f"❌ 海巡回覆失敗：{e}")
 
 
 async def hunt_viral_posts_job(force: bool = False):
