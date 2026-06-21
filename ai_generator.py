@@ -978,6 +978,27 @@ def generate_reply(
     return _apply_compliance(reply)
 
 
+def is_patrol_worthy(post_text: str) -> bool:
+    """
+    判斷貼文主要內容是否跟保險相關，才值得推播。
+    用 Haiku 降低成本。寬鬆標準：確定無關才擋。
+    """
+    system = """判斷這篇 Threads 貼文的主要內容是否跟「保險、保單、理賠、保費、醫療費、遺產規劃、壽險、實支實付、失能、長照」有關。
+
+YES：主要在討論保險相關話題（即使是抱怨保費貴、詢問保單問題、分享理賠經驗都算）
+NO：保險只是句子裡順帶一提，主要在聊生活瑣事、美食、旅遊、股票投資、政治、感情、工作抱怨等
+
+只輸出 YES 或 NO，不加任何說明。"""
+    try:
+        result = _call_claude(system, post_text[:400].strip(), max_tokens=5, model=COMPLIANCE_MODEL)
+        is_worthy = result.strip().upper().startswith("YES")
+        logger.info(f"[海巡相關性] {'通過' if is_worthy else '過濾'}: {post_text[:40]!r}")
+        return is_worthy
+    except Exception as e:
+        logger.error(f"[海巡相關性] 判斷失敗，預設通過: {e}")
+        return True  # 失敗時保守保留，不擋掉
+
+
 def _is_insurance_related(post_text: str) -> bool:
     """步驟一：判斷貼文是否與保險有任何關聯（寬鬆過濾，只擋完全無關）。"""
     system = """判斷這篇貼文是否跟「保險」有任何關聯，只輸出 YES 或 NO。

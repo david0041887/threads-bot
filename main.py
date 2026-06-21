@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import state
 from threads_client import ThreadsClient
-from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction, generate_post_angles, analyze_viral_post
+from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction, generate_post_angles, analyze_viral_post, is_patrol_worthy
 from notifier import notify_error, notify_reply_for_approval, send_telegram
 
 logging.basicConfig(
@@ -293,7 +293,7 @@ async def _proactive_patrol_job_inner(force: bool = False):
     # ── Phase 2：過濾 → 推播新貼文給用戶 ───────────────
     # 使用獨立 namespace "patrol_push"，不受舊 auto-reply 記錄干擾
     new_posts = []
-    skip_old = 0
+    skip_old = skip_irrelevant = 0
     for post in results:
         if state.is_processed("patrol_push", post.shortcode):
             continue
@@ -302,17 +302,23 @@ async def _proactive_patrol_job_inner(force: bool = False):
         if post.age_hours != 9999 and post.age_hours > PATROL_MAX_AGE_HOURS:
             skip_old += 1
             continue
+        # AI 相關性篩選：主要內容必須跟保險有關
+        if not is_patrol_worthy(post.text):
+            skip_irrelevant += 1
+            state.mark_processed("patrol_push", post.shortcode)  # 不相關也標記，避免重複判斷
+            continue
         new_posts.append(post)
         if len(new_posts) >= 3:
             break
 
     if not new_posts:
-        logger.info(f"[海巡] 關鍵字「{keyword}」無新貼文（舊:{skip_old}，共搜到:{len(results)}）")
+        logger.info(f"[海巡] 關鍵字「{keyword}」無新貼文（舊:{skip_old} 不相關:{skip_irrelevant}，共:{len(results)}）")
         if force:
             send_telegram(
                 f"🔍 手動海巡完成\n"
                 f"關鍵字：{keyword}（{search_mode}）\n"
-                f"搜到 {len(results)} 篇 → 無新貼文（太舊:{skip_old}）"
+                f"搜到 {len(results)} 篇 → 無新貼文\n"
+                f"太舊:{skip_old} 不相關:{skip_irrelevant}"
             )
         return
 
