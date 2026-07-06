@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import state
 from threads_client import ThreadsClient
-from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction, generate_post_angles, analyze_viral_post, is_patrol_worthy
+from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction, generate_post_angles, is_patrol_worthy
 from notifier import notify_error, notify_reply_for_approval, send_telegram
 
 logging.basicConfig(
@@ -50,8 +50,7 @@ SEARCH_KEYWORDS = [
     "儲蓄險", "醫療費用", "手術費", "保險規劃", "受益人指定",
 ]
 
-PATROL_MAX_AGE_HOURS = 1440  # 只回覆 60 天內的貼文（60×24）
-VIRAL_MIN_LIKES = 500        # 爆文最低 like 數（like=0 表示未知，不過濾）
+PATROL_MAX_AGE_HOURS = 168   # 只推播 7 天內的貼文（7×24）
 
 # 每日海巡配額
 PATROL_SCHEDULE = {
@@ -146,7 +145,6 @@ async def lifespan(app: FastAPI):
     state.init_db()
     _ensure_chromium()
     scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
-    scheduler.add_job(hunt_viral_posts_job, CronTrigger(hour=10, minute=0, timezone="Asia/Taipei"), id="viral_hunt_daily", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_processed_ids(days=90), CronTrigger(day_of_week="sun", hour=4, minute=30, timezone="Asia/Taipei"), id="processed_ids_cleanup", replace_existing=True)
     # 依 state 裡的 flag 決定海巡 / 留言輪詢是否啟動（跨部署記住）
@@ -339,121 +337,6 @@ async def _proactive_patrol_job_inner(force: bool = False):
         state.mark_processed("patrol_push", post.shortcode)
 
 
-async def hunt_viral_posts_job(force: bool = False):
-    try:
-        await _hunt_viral_posts_inner(force=force)
-    except Exception as e:
-        logger.error(f"[爆文獵手] 未預期錯誤: {e}", exc_info=True)
-        if force:
-            send_telegram(f"❌ 爆文獵手發生錯誤：\n{type(e).__name__}: {e}")
-
-
-async def _hunt_viral_posts_inner(force: bool = False):
-    if not PLAYWRIGHT_AVAILABLE:
-        if force:
-            send_telegram("❌ 爆文獵手失敗：Playwright 不可用")
-        return
-
-    # 每次隨機挑 3 個關鍵字，用 top 模式搜尋高流量貼文
-    keywords = random.sample(SEARCH_KEYWORDS, min(3, len(SEARCH_KEYWORDS)))
-    if force:
-        send_telegram(f"🔍 爆文獵手啟動...\n關鍵字：{'、'.join(keywords)}")
-
-    candidates = []
-    for keyword in keywords:
-        try:
-            results = await search_threads_by_keyword_async(keyword=keyword, limit=15, search_mode="top")
-            for post in results:
-                if not post.text or len(post.text) < 40:
-                    continue
-                if state.is_processed("viral", post.shortcode):
-                    continue
-                # like_count=0 表示 API 未回傳（可能很高，保留）；有數字但 < 門檻則過濾
-                if post.like_count > 0 and post.like_count < VIRAL_MIN_LIKES:
-                    logger.info(f"[爆文獵手] 跳過低流量 @{post.username} like={post.like_count}")
-                    continue
-                candidates.append((keyword, post))
-        except Exception as e:
-            logger.error(f"[爆文獵手] 搜尋 {keyword} 失敗: {e}")
-
-    if not candidates:
-        if force:
-            send_telegram("🔍 爆文獵手：無新的高流量貼文（全部已分析過）")
-        return
-
-    to_analyze = candidates[:4]  # 每次最多分析 4 篇
-
-    # 建立儲存資料夾
-    import datetime as _dt
-    from pathlib import Path as _Path
-    viral_dir = _Path("/app/data/viral_posts")
-    viral_dir.mkdir(parents=True, exist_ok=True)
-    date_str = _dt.datetime.now().strftime("%Y%m%d")
-
-    analyzed = []
-    for keyword, post in to_analyze:
-        state.mark_processed("viral", post.shortcode)
-        analysis = analyze_viral_post(post.text, keyword)
-        state.save_viral_post(
-            shortcode=post.shortcode,
-            keyword=keyword,
-            username=post.username,
-            text=post.text,
-            permalink=f"https://www.threads.com/t/{post.shortcode}",
-            analysis=analysis,
-        )
-        # 寫入 markdown 檔（儲存在 Railway Volume）
-        safe_user = post.username.replace("/", "_")[:20]
-        safe_kw = keyword[:8]
-        fname = f"{date_str}_{safe_kw}_{safe_user}.md"
-        md = (
-            f"# @{post.username} | {keyword} | {date_str}\n\n"
-            f"## 原文\n{post.text}\n\n"
-            f"## 連結\nhttps://www.threads.com/t/{post.shortcode}\n\n"
-            f"## 結構分析\n"
-            f"- **開場**：{analysis.get('opening_type','')}\n"
-            f"- **架構**：{analysis.get('structure','')}\n"
-            f"- **情緒鉤子**：{analysis.get('emotion_hook','')}\n"
-            f"- **知識密度**：{analysis.get('knowledge_density','')}\n"
-            f"- **核心事實**：{analysis.get('core_fact','')}\n"
-            f"- **為什麼爆**：{analysis.get('viral_reason','')}\n"
-            f"- **可複製公式**：{analysis.get('copyable_formula','')}\n"
-            f"- **骨架**：{analysis.get('skeleton_match','')}\n"
-        )
-        try:
-            (viral_dir / fname).write_text(md, encoding="utf-8")
-        except Exception as e:
-            logger.warning(f"[爆文獵手] 寫檔失敗: {e}")
-        analyzed.append((keyword, post, analysis))
-
-    # 每篇各發一則 TG（避免超過 4096 字元限制）
-    for i, (keyword, post, analysis) in enumerate(analyzed, 1):
-        like_str = f" · ❤️{post.like_count:,}" if post.like_count > 0 else " · ❤️未知"
-        lines = [
-            f"🔥 爆文分析 [{i}/{len(analyzed)}]",
-            f"🔍 「{keyword}」· @{post.username}{like_str}",
-            "",
-            post.text[:200] + ("…" if len(post.text) > 200 else ""),
-            "",
-            f"📊 開場：{analysis.get('opening_type','')}",
-            f"架構：{analysis.get('structure','')}",
-            f"情緒：{analysis.get('emotion_hook','')}",
-        ]
-        if analysis.get("core_fact") and analysis["core_fact"] != "無":
-            lines.append(f"核心事實：{analysis.get('core_fact','')}")
-        lines += [
-            "",
-            f"💡 為什麼爆：{analysis.get('viral_reason','')}",
-            f"✏️ 可複製公式：{analysis.get('copyable_formula','')}",
-            f"骨架：{analysis.get('skeleton_match','')}",
-            "",
-            f"https://www.threads.com/t/{post.shortcode}",
-        ]
-        send_telegram("\n".join(lines))
-
-    logger.info(f"[爆文獵手] 完成，分析 {len(analyzed)} 篇，已存 /app/data/viral_posts/")
-
-
 async def refresh_token_job():
     try:
         client = get_client()
@@ -573,12 +456,6 @@ async def telegram_message_handler(request: Request):
             except Exception as e:
                 send_telegram(f"❌ 失敗：{e}")
         asyncio.create_task(_gen_angles())
-        return JSONResponse({"ok": True})
-
-    # ── 爆文獵手 ─────────────────────────────────────
-    if text in ("找爆文", "爆文", "爆文獵手"):
-        send_telegram("🔍 爆文獵手啟動，搜尋高流量保險貼文並分析結構...")
-        asyncio.create_task(hunt_viral_posts_job(force=True))
         return JSONResponse({"ok": True})
 
     # ── 手動產生主題 ──────────────────────────────────
@@ -755,35 +632,6 @@ async def user_posts(username: str, limit: int = 50):
         {"index": i+1, "shortcode": p.shortcode, "username": p.username, "text": p.text}
         for i, p in enumerate(posts)
     ]
-
-
-@app.post("/admin/trigger-viral-hunt")
-async def manual_viral_hunt():
-    """手動觸發爆文獵手，結果透過 Telegram 通知。"""
-    import asyncio
-    asyncio.create_task(hunt_viral_posts_job(force=True))
-    return {"status": "started", "message": "爆文獵手已在背景執行，結果將透過 Telegram 通知"}
-
-
-@app.get("/admin/viral-posts")
-async def viral_posts_list(limit: int = 50):
-    """列出已分析的爆文清單。"""
-    posts = state.get_viral_posts(limit=limit)
-    return {
-        "total": state.count_viral_posts(),
-        "posts": [
-            {
-                "id": p["id"],
-                "username": p["username"],
-                "keyword": p["keyword"],
-                "text_preview": p["text"][:100],
-                "permalink": p["permalink"],
-                "found_at": p["found_at"],
-                "analysis": p["analysis"],
-            }
-            for p in posts
-        ],
-    }
 
 
 @app.get("/admin/stats")
