@@ -78,6 +78,20 @@ def _shortcode_to_id(shortcode: str) -> str:
     return str(n)
 
 
+def _build_search_url(encoded_keyword: str, search_mode: str) -> str:
+    """組搜尋網址。
+
+    Threads 網頁版用 filter=recent 切到「最近」分頁；不帶參數則是「最相關」。
+    舊版寫的 serp_type=top / serp_type=recent 是無效參數，Threads 直接忽略，
+    兩種模式都落回「最相關」排序 —— 這是海巡一直推到幾十天前舊文的根因。
+    （2026-07 在瀏覽器實地確認過網址列。）
+    """
+    url = f"https://www.threads.com/search?q={encoded_keyword}"
+    if search_mode != "top":
+        url += "&filter=recent"
+    return url
+
+
 @dataclass
 class ScrapedPost:
     shortcode: str
@@ -403,7 +417,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
 
             encoded = urllib.parse.quote(keyword)
             serp = "top" if search_mode == "top" else "recent"
-            search_url = f"https://www.threads.com/search?q={encoded}&serp_type={serp}"
+            search_url = _build_search_url(encoded, search_mode)
             logger.info(f"[海巡] 前往搜尋頁面 ({serp}): {search_url}")
             await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
             logger.info(f"[海巡] 目前 URL: {page.url}")
@@ -807,7 +821,7 @@ async def search_and_reply_async(
 
                 encoded = urllib.parse.quote(keyword)
                 serp = "top" if search_mode == "top" else "recent"
-                search_url = f"https://www.threads.com/search?q={encoded}&serp_type={serp}"
+                search_url = _build_search_url(encoded, search_mode)
                 logger.info(f"[海巡] 搜尋模式={serp}: {search_url}")
                 await page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
                 await asyncio.sleep(3)
