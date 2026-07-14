@@ -274,6 +274,21 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     try:
         search_result = await search_and_reply_async(keyword=keyword, reply_tasks=[], search_mode=search_mode)
         results = search_result.get("posts", [])
+        # 登入失效要講清楚：未登入時 Threads 會忽略 filter=recent 只給舊文，
+        # 講成「冷門關鍵字」會把人導向錯誤方向（這個誤導害我們查了很久）
+        if search_result.get("error") == "not_logged_in":
+            msg = (
+                "❌ 海巡無法運作：Threads 登入已失效\n"
+                "THREADS_COOKIES 的 sessionid 過期了，需要從瀏覽器重新匯出 cookie "
+                "並更新 Railway 環境變數。\n"
+                "在此之前海巡不會有任何推播。"
+            )
+            logger.error("[海巡] 未登入，THREADS_COOKIES 需更新")
+            if force:
+                send_telegram(msg)
+            else:
+                _notify_error_throttled("patrol_not_logged_in", msg)
+            return
     except Exception as e:
         logger.error(f"[海巡] 爬蟲搜尋失敗: {e}")
         if force:

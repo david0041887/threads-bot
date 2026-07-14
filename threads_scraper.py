@@ -269,36 +269,46 @@ async def _is_logged_in(page, context) -> bool:
         return False
 
 
-async def _ensure_logged_in(page, context) -> bool:
-    # 優先使用 THREADS_COOKIES 環境變數（從真實瀏覽器匯出）
+async def _load_cookies_from_env(context) -> int:
+    """把 THREADS_COOKIES（從真實瀏覽器匯出）載入 context，回傳載入筆數。
+
+    兩條路徑共用；先前各自複製一份。
+    """
     cookies_env = os.environ.get("THREADS_COOKIES", "")
-    if cookies_env:
-        try:
-            raw = json.loads(cookies_env)
-            pw_cookies = []
-            for c in raw:
-                pw = {
-                    "name": c["name"],
-                    "value": c["value"],
-                    "domain": c.get("domain", ".threads.com"),
-                    "path": c.get("path", "/"),
-                }
-                # Cookie-Editor 用 expirationDate，Playwright 用 expires
-                exp = c.get("expirationDate") or c.get("expires")
-                if exp and exp > 0:
-                    pw["expires"] = int(exp)
-                if "httpOnly" in c:
-                    pw["httpOnly"] = bool(c["httpOnly"])
-                if "secure" in c:
-                    pw["secure"] = bool(c["secure"])
-                # 修正 sameSite 值（可能為 None）
-                ss = c.get("sameSite") or "Lax"
-                pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), "Lax")
-                pw_cookies.append(pw)
-            await context.add_cookies(pw_cookies)
-            logger.info(f"[海巡] 已從環境變數載入 {len(pw_cookies)} 個 cookies")
-        except Exception as e:
-            logger.warning(f"[海巡] THREADS_COOKIES 解析失敗: {e}")
+    if not cookies_env:
+        return 0
+    try:
+        raw = json.loads(cookies_env)
+        pw_cookies = []
+        for c in raw:
+            pw = {
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c.get("domain", ".threads.com"),
+                "path": c.get("path", "/"),
+            }
+            # Cookie-Editor 用 expirationDate，Playwright 用 expires
+            exp = c.get("expirationDate") or c.get("expires")
+            if exp and exp > 0:
+                pw["expires"] = int(exp)
+            if "httpOnly" in c:
+                pw["httpOnly"] = bool(c["httpOnly"])
+            if "secure" in c:
+                pw["secure"] = bool(c["secure"])
+            # 修正 sameSite 值（可能為 None）
+            ss = c.get("sameSite") or "Lax"
+            pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), "Lax")
+            pw_cookies.append(pw)
+        await context.add_cookies(pw_cookies)
+        logger.info(f"[海巡] 已從環境變數載入 {len(pw_cookies)} 個 cookies")
+        return len(pw_cookies)
+    except Exception as e:
+        logger.warning(f"[海巡] THREADS_COOKIES 解析失敗: {e}")
+        return 0
+
+
+async def _ensure_logged_in(page, context) -> bool:
+    await _load_cookies_from_env(context)
 
     # 前往首頁確認登入狀態
     await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=30000)
@@ -772,32 +782,7 @@ async def search_and_reply_async(
         )
         context = await browser.new_context(**_CONTEXT_OPTS)
 
-        # 載入 cookies
-        cookies_env = os.environ.get("THREADS_COOKIES", "")
-        if cookies_env:
-            try:
-                raw = json.loads(cookies_env)
-                pw_cookies = []
-                for c in raw:
-                    pw = {
-                        "name": c["name"],
-                        "value": c["value"],
-                        "domain": c.get("domain", ".threads.com"),
-                        "path": c.get("path", "/"),
-                    }
-                    exp = c.get("expirationDate") or c.get("expires")
-                    if exp and exp > 0:
-                        pw["expires"] = int(exp)
-                    if "httpOnly" in c:
-                        pw["httpOnly"] = bool(c["httpOnly"])
-                    if "secure" in c:
-                        pw["secure"] = bool(c["secure"])
-                    ss = c.get("sameSite") or "Lax"
-                    pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), "Lax")
-                    pw_cookies.append(pw)
-                await context.add_cookies(pw_cookies)
-            except Exception as e:
-                logger.warning(f"[海巡] cookies 載入失敗: {e}")
+        await _load_cookies_from_env(context)
 
         page = await context.new_page()
         replied = []
@@ -805,12 +790,17 @@ async def search_and_reply_async(
         posts = []
 
         try:
-            # 確認登入
+            # 確認登入（不能用 URL 或 cookie 判斷，理由見 _is_logged_in）
             await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=25000)
             await asyncio.sleep(2)
-            if "login" in page.url.lower():
-                logger.error("[海巡] 未登入，無法執行")
-                return {"posts": [], "replied": [], "failed": [t["shortcode"] for t in reply_tasks]}
+            if not await _is_logged_in(page, context):
+                logger.error("[海巡] 未登入：THREADS_COOKIES 已失效，海巡無法運作")
+                return {
+                    "posts": [],
+                    "replied": [],
+                    "failed": [t["shortcode"] for t in reply_tasks],
+                    "error": "not_logged_in",
+                }
 
             # 搜尋（Phase 2 傳 skip_search=True 時跳過）
             if not skip_search:
