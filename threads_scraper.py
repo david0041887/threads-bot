@@ -121,6 +121,7 @@ class ScrapedPost:
     age_hours: int = 9999  # 貼文年齡（小時），9999=無法判斷
     like_count: int = 0    # 0 = 未知（API 未回傳）
     age_source: str = "無"  # 時間來源：DOM / API / 文字 / 無（診斷用）
+    is_reply: bool = False  # 是否為別人貼文底下的留言（True 則海巡跳過）
 
     @property
     def id(self) -> str:
@@ -351,6 +352,58 @@ async def _is_logged_in(page, context) -> bool:
     except Exception as e:
         logger.warning(f"[海巡] 登入狀態判斷失敗，保守視為未登入: {e}")
         return False
+
+
+async def _mark_replies(page, posts, max_age_hours: int = 200) -> int:
+    """標記哪些貼文其實是「別人貼文底下的留言」（is_reply），海巡要跳過只留原創貼文。
+
+    搜尋卡片的 DOM 分不出留言與原創（實測過），但貼文自己的頁面在登入 session 下
+    帶有 "is_reply":true/false 欄位。用瀏覽器 session 內平行 fetch 各貼文頁取得（httpx
+    帶 cookie 拿不到這欄位，只有瀏覽器 session 的 fetch 拿得到）。
+    只查近期（max_age_hours 內）的貼文以省流量——舊文本來就會被時間篩選擋掉。
+    無法判斷時保守視為非留言（不誤殺原創）。回傳被標記為留言的篇數。
+    """
+    items = [
+        {"sc": p.shortcode, "u": p.username}
+        for p in posts
+        if p.shortcode and p.age_hours <= max_age_hours
+    ]
+    if not items:
+        return 0
+    try:
+        result = await page.evaluate(
+            """async (items) => {
+                const out = {};
+                let idx = 0;
+                async function worker(){
+                    while (idx < items.length){
+                        const it = items[idx++];
+                        const url = it.u
+                            ? `https://www.threads.com/@${it.u}/post/${it.sc}`
+                            : `https://www.threads.com/t/${it.sc}`;
+                        try {
+                            const r = await fetch(url, {credentials:'include'});
+                            const t = await r.text();
+                            const m = t.match(/"is_reply"\\s*:\\s*(true|false)/);
+                            out[it.sc] = m ? (m[1] === 'true') : null;
+                        } catch(e){ out[it.sc] = null; }
+                    }
+                }
+                const CONC = Math.min(6, items.length);
+                await Promise.all(Array.from({length: CONC}, worker));
+                return out;
+            }""",
+            items,
+        )
+        n = 0
+        for p in posts:
+            if result.get(p.shortcode) is True:
+                p.is_reply = True
+                n += 1
+        return n
+    except Exception as e:
+        logger.warning(f"[海巡] is_reply 標記失敗（不擋，全視為非留言）: {e}")
+        return 0
 
 
 async def _load_cookies_from_env(context) -> int:
@@ -971,12 +1024,16 @@ async def search_and_reply_async(
                     except Exception:
                         pass
 
+                # 標記留言（別人貼文底下的回覆），海巡只留原創貼文
+                reply_n = await _mark_replies(page, posts)
+
                 known = [p.age_hours for p in posts if p.age_hours != 9999]
                 logger.info(
                     f"[海巡] 找到 {len(posts)} 篇貼文"
                     f"（時間可判斷:{len(known)}/{len(posts)}"
                     + (f"，最新:{min(known)}h 最舊:{max(known)}h" if known else "")
-                    + f"，7日內:{sum(1 for a in known if a <= 168)} 篇）"
+                    + f"，7日內:{sum(1 for a in known if a <= 168)} 篇"
+                    + f"，其中留言:{reply_n} 篇）"
                 )
 
             # 對指定貼文做 UI 回覆

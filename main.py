@@ -315,11 +315,16 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     # ── Phase 2：過濾 → 推播新貼文給用戶 ───────────────
     # 使用獨立 namespace "patrol_push"，不受舊 auto-reply 記錄干擾
     new_posts = []
-    skip_old = skip_irrelevant = skip_no_age = 0
+    skip_old = skip_irrelevant = skip_no_age = skip_reply = 0
     for post in results:
         if state.is_processed("patrol_push", post.shortcode):
             continue
         if not post.text or len(post.text) < 20:
+            continue
+        # 留言（別人貼文底下的回覆）一律跳過，只推原創貼文
+        if getattr(post, "is_reply", False):
+            skip_reply += 1
+            state.mark_processed("patrol_push", post.shortcode)  # 標記避免重複判斷
             continue
         # 時間解析失敗（9999）一律擋：無法確認是否在 7 日內就不推
         if post.age_hours == 9999:
@@ -328,7 +333,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
         if post.age_hours > PATROL_MAX_AGE_HOURS:
             skip_old += 1
             continue
-        # AI 相關性篩選：主要內容必須跟保險有關
+        # AI 相關性篩選：台灣 + 保險 + 發文者是潛在客戶（非同業推銷）
         if not is_patrol_worthy(post.text):
             skip_irrelevant += 1
             state.mark_processed("patrol_push", post.shortcode)  # 不相關也標記，避免重複判斷
@@ -354,7 +359,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     if not new_posts:
         logger.info(
             f"[海巡] 關鍵字「{keyword}」無新貼文"
-            f"（舊:{skip_old} 時間不明:{skip_no_age} 不相關:{skip_irrelevant}，共:{len(results)}）"
+            f"（舊:{skip_old} 時間不明:{skip_no_age} 留言:{skip_reply} 不相關:{skip_irrelevant}，共:{len(results)}）"
             f" 時間來源[{src_str}] {age_str}"
         )
         if force:
@@ -362,7 +367,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
                 f"🔍 手動海巡完成\n"
                 f"關鍵字：{keyword}（{search_mode}）\n"
                 f"搜到 {len(results)} 篇 → 無新貼文\n"
-                f"太舊:{skip_old} 時間不明:{skip_no_age} 不相關:{skip_irrelevant}\n"
+                f"太舊:{skip_old} 時間不明:{skip_no_age} 留言:{skip_reply} 不相關:{skip_irrelevant}\n"
                 f"── 診斷 ──\n"
                 f"時間來源：{src_str}\n"
                 f"{age_str}"
