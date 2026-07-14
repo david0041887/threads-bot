@@ -86,6 +86,7 @@ class ScrapedPost:
     media_id: str = ""
     age_hours: int = 9999  # 貼文年齡（小時），9999=無法判斷
     like_count: int = 0    # 0 = 未知（API 未回傳）
+    age_source: str = "無"  # 時間來源：DOM / API / 文字 / 無（診斷用）
 
     @property
     def id(self) -> str:
@@ -466,7 +467,6 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     if dom_age != 9999:
                         age_hours = dom_age
                         source = "DOM"
-                    logger.info(f"[海巡時間] {shortcode} 來源={source} age_hours={age_hours}")
 
                     if not text or len(text) < 20:
                         continue
@@ -476,7 +476,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     posts.append(ScrapedPost(
                         shortcode=shortcode, text=text, username=username,
                         media_id=media_id, age_hours=age_hours,
-                        like_count=api_like_map.get(shortcode, 0),
+                        like_count=api_like_map.get(shortcode, 0), age_source=source,
                     ))
                     if len(posts) >= limit:
                         break
@@ -842,18 +842,21 @@ async def search_and_reply_async(
                         media_id = api_pk_map.get(sc) or (result.get("mediaId") or "").strip() or _shortcode_to_id(sc)
                         # 時間來源優先序：DOM <time> > API taken_at > 文字解析
                         text, age_hours = _parse_post_text(raw_text)
+                        age_source = "文字" if age_hours != 9999 else "無"
                         taken_at = api_taken_at_map.get(sc)
                         if taken_at:
                             age_hours = _age_hours_from_taken_at(taken_at)
+                            age_source = "API"
                         dom_age = _age_hours_from_datetime(result.get("datetime") or "")
                         if dom_age != 9999:
                             age_hours = dom_age
+                            age_source = "DOM"
                         if not text or len(text) < 20 or username.lower() == my_username:
                             continue
                         posts.append(ScrapedPost(
                             shortcode=sc, text=text, username=username,
                             media_id=media_id, age_hours=age_hours,
-                            like_count=api_like_map.get(sc, 0),
+                            like_count=api_like_map.get(sc, 0), age_source=age_source,
                         ))
                     except Exception:
                         pass

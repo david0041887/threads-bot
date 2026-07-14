@@ -313,17 +313,35 @@ async def _proactive_patrol_job_inner(force: bool = False):
         if len(new_posts) >= 3:
             break
 
+    # 時間診斷：來源分佈 + 年齡分佈（判斷 7 日窗口是否過窄）
+    src_count: dict[str, int] = {}
+    for p in results:
+        src_count[p.age_source] = src_count.get(p.age_source, 0) + 1
+    src_str = " ".join(f"{k}:{v}" for k, v in sorted(src_count.items()))
+    known_ages = sorted(p.age_hours for p in results if p.age_hours != 9999)
+    if known_ages:
+        age_str = (
+            f"最新:{known_ages[0]}h 最舊:{known_ages[-1]}h "
+            f"7日內:{sum(1 for a in known_ages if a <= PATROL_MAX_AGE_HOURS)}篇"
+        )
+    else:
+        age_str = "無任何可判斷時間的貼文"
+
     if not new_posts:
         logger.info(
             f"[海巡] 關鍵字「{keyword}」無新貼文"
             f"（舊:{skip_old} 時間不明:{skip_no_age} 不相關:{skip_irrelevant}，共:{len(results)}）"
+            f" 時間來源[{src_str}] {age_str}"
         )
         if force:
             send_telegram(
                 f"🔍 手動海巡完成\n"
                 f"關鍵字：{keyword}（{search_mode}）\n"
                 f"搜到 {len(results)} 篇 → 無新貼文\n"
-                f"太舊:{skip_old} 時間不明:{skip_no_age} 不相關:{skip_irrelevant}"
+                f"太舊:{skip_old} 時間不明:{skip_no_age} 不相關:{skip_irrelevant}\n"
+                f"── 診斷 ──\n"
+                f"時間來源：{src_str}\n"
+                f"{age_str}"
             )
         return
 
