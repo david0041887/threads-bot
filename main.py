@@ -711,7 +711,7 @@ async def env_check():
 
 
 @app.get("/admin/test-search")
-async def test_search(keyword: str = Query(default="保險")):
+async def test_search(keyword: str = Query(default="保險"), mode: str = Query(default="recent")):
     if not PLAYWRIGHT_AVAILABLE:
         return {"error": "Playwright 不可用"}
     import io, logging as _logging
@@ -721,10 +721,11 @@ async def test_search(keyword: str = Query(default="保險")):
     for name in ("threads_scraper", "main"):
         _logging.getLogger(name).addHandler(handler)
     try:
-        results = await search_threads_by_keyword_async(keyword=keyword, limit=5)
+        results = await search_threads_by_keyword_async(keyword=keyword, limit=15, search_mode=mode)
         logs = buf.getvalue()
         return {
             "keyword": keyword,
+            "mode": mode,
             "count": len(results),
             "results": [
                 {
