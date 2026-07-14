@@ -246,22 +246,22 @@ def _extract_taken_at_map(json_text: str) -> dict[str, int]:
 
 
 async def _is_logged_in(page, context) -> bool:
-    """判斷是否真的登入 Threads。
+    """判斷是否真的登入 Threads。只看伺服器渲染出來的 DOM。
 
-    **不能用 URL 判斷。** 未登入時 threads.com/ 並不會導向 /login，而是直接
-    顯示公開首頁，所以舊版的 `"login" in current_url` 永遠是 False —— 等於
-    不管 cookie 有沒有失效都回報「已登入」。海巡因此長期在未登入狀態下空轉，
-    而未登入的 Threads 會忽略 filter=recent、只給相關性排序的舊文。
+    兩種看似直覺的判斷法都是假陽性，別再用：
+    - **URL**：未登入時 threads.com/ 不會導向 /login，而是直接顯示公開首頁，
+      所以 `"login" in current_url` 永遠是 False。
+    - **cookie 有沒有 ds_user_id**：那是我們自己從 THREADS_COOKIES 塞進去的，
+      當然永遠存在。它只證明 cookie 被載入，不證明伺服器認可這個 session。
 
-    可靠指標（2026-07 實測對照真實瀏覽器與未登入 Playwright）：
-    - 已登入：cookie 有 ds_user_id；頁面有「新串文」撰寫入口
-    - 未登入：cookie 只有 csrftoken / ig_did / mid；頁面有登入按鈕
+    只有伺服器吐回來的 DOM 反映伺服器的認定（2026-07 實測對照真實瀏覽器與
+    未登入 Playwright，兩個指標都有鑑別力）：
+    - 已登入：無登入連結、有「新串文」撰寫入口
+    - 未登入：有登入連結、無撰寫入口
     """
     try:
-        names = {c["name"] for c in await context.cookies()}
-        if "ds_user_id" in names:
-            return True
-        # cookie 判斷不到時退而求其次看 DOM
+        if await page.query_selector("a[href*='/login']"):
+            return False
         composer = await page.query_selector('svg[aria-label="新串文"], [aria-label*="新串文"]')
         return composer is not None
     except Exception as e:
