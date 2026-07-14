@@ -235,10 +235,13 @@ async def poll_replies_job():
         client.close()
 
 
-async def proactive_patrol_job(force: bool = False):
-    """每 15 分鐘執行一次，用瀏覽器 UI 在串文底下直接回覆。force=True 可跳過時段限制。"""
+async def proactive_patrol_job(force: bool = False, keyword: str | None = None):
+    """每 15 分鐘執行一次，用瀏覽器 UI 在串文底下直接回覆。force=True 可跳過時段限制。
+
+    keyword 可指定關鍵字（測試用），省略則從 SEARCH_KEYWORDS 隨機挑。
+    """
     try:
-        await _proactive_patrol_job_inner(force=force)
+        await _proactive_patrol_job_inner(force=force, keyword=keyword)
     except Exception as e:
         logger.error(f"[海巡] 未預期錯誤: {e}", exc_info=True)
         if force:
@@ -247,7 +250,7 @@ async def proactive_patrol_job(force: bool = False):
             _notify_error_throttled("patrol_unexpected", str(e))
 
 
-async def _proactive_patrol_job_inner(force: bool = False):
+async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None = None):
     reset_daily_count()
 
     # 只在 07:00–00:00 Taipei 執行（force 模式不受限）
@@ -257,7 +260,7 @@ async def _proactive_patrol_job_inner(force: bool = False):
     if not force and not (7 <= h < 24):
         return
 
-    keyword = random.choice(SEARCH_KEYWORDS)
+    keyword = keyword or random.choice(SEARCH_KEYWORDS)
     # 20% 機率搜熱門，80% 搜最新（以發現最新貼文為主）
     search_mode = "top" if random.random() < 0.2 else "recent"
     logger.info(f"[海巡] 搜尋關鍵字：{keyword}，模式：{search_mode}")
@@ -280,10 +283,16 @@ async def _proactive_patrol_job_inner(force: bool = False):
         return
 
     if not results:
-        # 搜到 0 篇：可能是 cookie 過期，throttle 通知
-        _notify_error_throttled("patrol_empty", f"搜尋「{keyword}」回傳 0 篇，可能 Cookie 過期")
+        # 搜到 0 篇：冷門關鍵字本來就可能無結果，未必是 Cookie 問題。
+        # 真的要確認登入狀態請看 /admin/test-search 的 log（有無「無結果」vs 連搜尋頁都進不去）。
+        _notify_error_throttled("patrol_empty", f"搜尋「{keyword}」回傳 0 篇")
         if force:
-            send_telegram(f"🔍 手動海巡完成\n關鍵字：{keyword}（{search_mode}）\n搜尋結果：0 篇（Cookie 可能過期）")
+            send_telegram(
+                f"🔍 手動海巡完成\n"
+                f"關鍵字：{keyword}（{search_mode}）\n"
+                f"搜尋結果：0 篇\n"
+                f"（冷門關鍵字常態，非必然是 Cookie 問題）"
+            )
         return
 
     random.shuffle(results)
@@ -621,11 +630,15 @@ async def manual_poll():
 
 
 @app.post("/admin/trigger-patrol")
-async def manual_patrol():
-    """非阻塞觸發海巡，結果透過 Telegram 通知。"""
+async def manual_patrol(keyword: str = Query(default=None)):
+    """非阻塞觸發海巡，結果透過 Telegram 通知。keyword 可指定關鍵字（測試用）。"""
     import asyncio
-    asyncio.create_task(proactive_patrol_job(force=True))
-    return {"status": "started", "message": "海巡已在背景執行，結果將透過 Telegram 通知"}
+    asyncio.create_task(proactive_patrol_job(force=True, keyword=keyword))
+    return {
+        "status": "started",
+        "keyword": keyword or "（隨機）",
+        "message": "海巡已在背景執行，結果將透過 Telegram 通知",
+    }
 
 
 @app.get("/admin/patrol-stats")
