@@ -361,7 +361,8 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
 
             logger.info(
                 f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk 對應、"
-                f"{len(api_taken_at_map)} 個 taken_at 時間戳"
+                f"{len(api_taken_at_map)} 個 taken_at 時間戳 "
+                f"keys={list(api_taken_at_map)[:8]}"
             )
             my_username = os.environ.get("THREADS_USERNAME", "").lower()
 
@@ -423,6 +424,10 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     taken_at = api_taken_at_map.get(shortcode)
                     if taken_at:
                         age_hours = _age_hours_from_taken_at(taken_at)
+                    logger.info(
+                        f"[海巡診斷] shortcode={shortcode} "
+                        f"taken_at={'命中' if taken_at else '未命中'} age_hours={age_hours}"
+                    )
 
                     if not text or len(text) < 20:
                         continue
