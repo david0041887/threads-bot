@@ -695,7 +695,15 @@ async def test_search(keyword: str = Query(default="保險")):
         return {
             "keyword": keyword,
             "count": len(results),
-            "results": [{"shortcode": p.shortcode, "username": p.username, "text": p.text[:80]} for p in results],
+            "results": [
+                {
+                    "shortcode": p.shortcode,
+                    "username": p.username,
+                    "age_hours": p.age_hours,  # 9999 = 無法判斷時間
+                    "text": p.text[:80],
+                }
+                for p in results
+            ],
             "logs": logs,
         }
     except Exception as e:

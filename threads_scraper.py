@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,8 +48,28 @@ class ScrapedPost:
         return self.media_id or _shortcode_to_id(self.shortcode)
 
 
+_TS_UNIT_HOURS = {"s": 1, "m": 1, "h": 1, "d": 24, "w": 168, "y": 8760}
+
+
+def _ts_to_age_hours(n: int, unit: str) -> int:
+    """把 Threads 的相對時間標籤（如 5h、3d）換算成小時。秒/分一律視為 1 小時。"""
+    if unit in ("s", "m"):
+        return 1
+    return n * _TS_UNIT_HOURS[unit]
+
+
+def _age_hours_from_taken_at(taken_at: int) -> int:
+    """把 API 的 Unix 時間戳換算成貼文年齡（小時）。"""
+    age = int((time.time() - taken_at) // 3600)
+    return max(0, age)
+
+
 def _parse_post_text(raw_text: str) -> tuple[str, int]:
-    """清理貼文文字，同時萃取時間戳轉為小時數。回傳 (clean_text, age_hours)。"""
+    """清理貼文文字，同時萃取時間戳轉為小時數。回傳 (clean_text, age_hours)。
+
+    注意：這是時間的「後備」來源，版面一變就抓不到。優先使用 API 攔截到的
+    taken_at（見 _extract_taken_at_map）。
+    """
     lines = raw_text.splitlines()
     clean_lines = []
     age_hours = 9999
@@ -58,23 +79,73 @@ def _parse_post_text(raw_text: str) -> tuple[str, int]:
         if skipping:
             if not s:
                 continue
-            ts = re.match(r'^(\d+)([mhdw])$', s)
+            # 時間戳可能自成一行（"5h"），也可能夾在分隔線裡（"帳號 · 5h"）
+            ts = re.match(r'^(\d+)\s*([smhdwy])$', s) or re.search(r'·\s*(\d+)\s*([smhdwy])\s*$', s)
             if ts:
-                n, unit = int(ts.group(1)), ts.group(2)
-                if unit == 'm':
-                    age_hours = 1  # 幾分鐘內的貼文視為 1 小時
-                elif unit == 'h':
-                    age_hours = n
-                elif unit == 'd':
-                    age_hours = n * 24
-                else:
-                    age_hours = n * 168
+                age_hours = _ts_to_age_hours(int(ts.group(1)), ts.group(2))
                 continue
             if len(s) < 15 or re.match(r'^@?\w{1,20}$', s):
                 continue
             skipping = False
         clean_lines.append(s)
+    # 正文裡若還找得到獨立的時間戳行，補抓一次（版面把時間放在文字後面時）
+    if age_hours == 9999:
+        m = re.search(r'(?:^|\n)\s*(\d+)\s*([smhdwy])\s*(?:\n|$)', raw_text)
+        if m:
+            age_hours = _ts_to_age_hours(int(m.group(1)), m.group(2))
     return ("\n".join(clean_lines).strip() or raw_text), age_hours
+
+
+_TS_PATTERN = re.compile(r'"taken_at"\s*:\s*(\d{10})')
+
+
+def _extract_taken_at_map(json_text: str) -> dict[str, int]:
+    """從 API JSON 回應中提取 shortcode → taken_at（Unix 秒）對應表。
+
+    這是時間的可靠來源：不受版面改版影響。
+    優先用正式 JSON 解析，確保 code 與 taken_at 來自「同一個物件」——
+    用前後視窗的正則會抓到隔壁貼文的時間戳，導致舊文被誤判成新文。
+    """
+    taken_map: dict[str, int] = {}
+
+    # 1. 正式 JSON 解析（可靠）：同一物件內同時有 code / shortcode 與 taken_at
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            code = node.get("code") or node.get("shortcode")
+            ts = node.get("taken_at")
+            if isinstance(code, str) and isinstance(ts, int) and 10**9 < ts < 10**10:
+                taken_map.setdefault(code, ts)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+
+    try:
+        _walk(json.loads(json_text))
+    except Exception:
+        pass
+    if taken_map:
+        return taken_map
+
+    # 2. 後備：body 不是純 JSON（例如被 JS 包裹）時，就近找最接近的 taken_at
+    try:
+        for m in re.finditer(r'"(?:code|shortcode)"\s*:\s*"([A-Za-z0-9_-]{6,15})"', json_text):
+            code = m.group(1)
+            if code in taken_map:
+                continue
+            # 先往後找（JSON 慣例是 code 在前、taken_at 在後）
+            fwd = _TS_PATTERN.search(json_text, m.end(), min(len(json_text), m.end() + 800))
+            if fwd:
+                taken_map[code] = int(fwd.group(1))
+                continue
+            # 再往前找「最靠近」的一個，而不是視窗內第一個
+            back = list(_TS_PATTERN.finditer(json_text, max(0, m.start() - 800), m.start()))
+            if back:
+                taken_map[code] = int(back[-1].group(1))
+    except Exception:
+        pass
+    return taken_map
 
 
 async def _ensure_logged_in(page, context) -> bool:
@@ -237,6 +308,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
         # shortcode → 真實 media_id（從 API 回應攔截）
         api_pk_map: dict[str, str] = {}
         api_like_map: dict[str, int] = {}
+        api_taken_at_map: dict[str, int] = {}
 
         async def _capture_pk(response):
             try:
@@ -254,6 +326,9 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     likes = _extract_like_map(body)
                     if likes:
                         api_like_map.update(likes)
+                    taken = _extract_taken_at_map(body)
+                    if taken:
+                        api_taken_at_map.update(taken)
             except Exception:
                 pass
 
@@ -284,7 +359,10 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                 await page.evaluate("window.scrollBy(0, window.innerHeight)")
                 await asyncio.sleep(1.5)
 
-            logger.info(f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk 對應")
+            logger.info(
+                f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk 對應、"
+                f"{len(api_taken_at_map)} 個 taken_at 時間戳"
+            )
             my_username = os.environ.get("THREADS_USERNAME", "").lower()
 
             # 取得所有貼文連結，從連結往上找貼文容器
@@ -341,6 +419,10 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     logger.debug(f"[海巡] shortcode={shortcode} media_id={media_id} (api_map={bool(api_pk_map.get(shortcode))})")
 
                     text, age_hours = _parse_post_text(raw_text)
+                    # API 的 taken_at 優先，文字解析只是後備
+                    taken_at = api_taken_at_map.get(shortcode)
+                    if taken_at:
+                        age_hours = _age_hours_from_taken_at(taken_at)
 
                     if not text or len(text) < 20:
                         continue
