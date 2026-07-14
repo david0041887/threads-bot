@@ -981,28 +981,36 @@ def generate_reply(
 def is_patrol_worthy(post_text: str) -> bool:
     """
     判斷貼文主要內容是否跟保險相關，才值得推播。
-    用 Haiku 降低成本。寬鬆標準：確定無關才擋。
+    用 Haiku 降低成本。嚴格標準：無法確定就擋（寧可少推，不要推錯）。
     """
     system = """判斷這篇 Threads 貼文是否符合「台灣保險相關」的推播標準。
 
-必須同時滿足以下兩條件才回答 YES：
-1. 主要內容在討論保險話題（保單、理賠、保費、壽險、醫療險、實支實付、失能、長照、遺產規劃等）
-2. 是台灣情境（使用新台幣/NTD、台灣法規、台灣保險公司，或無明顯地區標記）
+必須同時滿足以下兩條件才回答 YES。任一條件無法確定，就回答 NO：
 
-直接回答 NO 的情況：
-- 保險只是順帶一提，主要在聊生活、美食、旅遊、股票、政治、感情
-- 涉及香港（強積金、MPF、港元、港幣、HKD）或澳門內容
-- 明顯非台灣保險制度或幣別
+1. 主要內容在討論保險話題（保單、理賠、保費、壽險、醫療險、實支實付、失能、長照、遺產規劃等）。
+   保險只是順帶一提、主要在聊生活美食旅遊股票政治感情的，回答 NO。
 
-只輸出 YES 或 NO，不加任何說明。"""
+2. 能積極判斷這是台灣人在講台灣的保險。判斷依據：
+   - 幣別：新台幣、NT$、台幣
+   - 制度法規：健保、勞保、國保、二代健保、實支實付、重大傷病卡
+   - 台灣保險公司：國泰、南山、富邦、新光、台灣人壽、中國信託人壽、全球人壽、遠雄
+   - 台灣地名或台灣中文的用字遣詞與語感
+
+直接回答 NO 的情況（重要）：
+- 找不到任何台灣訊號。無法判斷地區時一律 NO，絕對不要因為「沒有明顯的外地標記」就假設是台灣。
+- 港澳訊號：強積金、MPF、港元、港幣、HKD、澳門幣、危疾、自願醫保、VHIS、勞保處
+- 港式中文或粵語用字：係、唔、嘅、咗、喺、乜、嘢、點解、而家、返工、幾錢、屋企
+- 簡體字，或中國大陸用語：社保、五險一金、人民幣、RMB、重疾險、醫保卡
+
+判斷不出來就是 NO。只輸出 YES 或 NO，不加任何說明。"""
     try:
-        result = _call_claude(system, post_text[:400].strip(), max_tokens=5, model=COMPLIANCE_MODEL)
+        result = _call_claude(system, post_text[:1500].strip(), max_tokens=5, model=COMPLIANCE_MODEL)
         is_worthy = result.strip().upper().startswith("YES")
         logger.info(f"[海巡相關性] {'通過' if is_worthy else '過濾'}: {post_text[:40]!r}")
         return is_worthy
     except Exception as e:
-        logger.error(f"[海巡相關性] 判斷失敗，預設通過: {e}")
-        return True  # 失敗時保守保留，不擋掉
+        logger.error(f"[海巡相關性] 判斷失敗，擋掉不推播: {e}")
+        return False  # fail-closed：判斷不了就別推，寧可少推不要推錯
 
 
 def _is_insurance_related(post_text: str) -> bool:

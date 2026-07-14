@@ -291,13 +291,17 @@ async def _proactive_patrol_job_inner(force: bool = False):
     # ── Phase 2：過濾 → 推播新貼文給用戶 ───────────────
     # 使用獨立 namespace "patrol_push"，不受舊 auto-reply 記錄干擾
     new_posts = []
-    skip_old = skip_irrelevant = 0
+    skip_old = skip_irrelevant = skip_no_age = 0
     for post in results:
         if state.is_processed("patrol_push", post.shortcode):
             continue
         if not post.text or len(post.text) < 20:
             continue
-        if post.age_hours != 9999 and post.age_hours > PATROL_MAX_AGE_HOURS:
+        # 時間解析失敗（9999）一律擋：無法確認是否在 7 日內就不推
+        if post.age_hours == 9999:
+            skip_no_age += 1
+            continue
+        if post.age_hours > PATROL_MAX_AGE_HOURS:
             skip_old += 1
             continue
         # AI 相關性篩選：主要內容必須跟保險有關
@@ -310,13 +314,16 @@ async def _proactive_patrol_job_inner(force: bool = False):
             break
 
     if not new_posts:
-        logger.info(f"[海巡] 關鍵字「{keyword}」無新貼文（舊:{skip_old} 不相關:{skip_irrelevant}，共:{len(results)}）")
+        logger.info(
+            f"[海巡] 關鍵字「{keyword}」無新貼文"
+            f"（舊:{skip_old} 時間不明:{skip_no_age} 不相關:{skip_irrelevant}，共:{len(results)}）"
+        )
         if force:
             send_telegram(
                 f"🔍 手動海巡完成\n"
                 f"關鍵字：{keyword}（{search_mode}）\n"
                 f"搜到 {len(results)} 篇 → 無新貼文\n"
-                f"太舊:{skip_old} 不相關:{skip_irrelevant}"
+                f"太舊:{skip_old} 時間不明:{skip_no_age} 不相關:{skip_irrelevant}"
             )
         return
 
