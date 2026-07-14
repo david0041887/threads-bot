@@ -317,7 +317,7 @@ async def _ensure_logged_in(page, context) -> bool:
     logger.info(f"[海巡] threads.com 目前 URL: {current_url}")
 
     if await _is_logged_in(page, context):
-        logger.info("[海巡] 已登入（ds_user_id 存在）")
+        logger.info("[海巡] 已登入")
         return True
 
     logger.warning("[海巡] 未登入：THREADS_COOKIES 已失效或未設定，嘗試帳密登入")
