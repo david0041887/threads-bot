@@ -27,6 +27,49 @@ COOKIES_FILE = "threads_cookies.json"
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
+# 從貼文連結往上遍歷 DOM，抓出貼文文字、帳號、media ID 與時間。
+# 兩條搜尋路徑（search_threads_by_keyword_async / search_and_reply_async）共用同一份，
+# 先前各自複製一份導致修了一邊、另一邊沒跟上。
+_POST_EXTRACT_JS = r"""el => {
+    let node = el, text = '', username = '', mediaId = '';
+    for (let i = 0; i < 15; i++) {
+        node = node.parentElement;
+        if (!node) break;
+        const t = (node.innerText || '').trim();
+        const did = node.getAttribute('data-id') || node.getAttribute('data-post-id') || node.getAttribute('data-media-id');
+        if (did && /^\d{10,}$/.test(did)) mediaId = did;
+        if (!text && t.length > 50) text = t.slice(0, 500);
+    }
+    node = el;
+    for (let i = 0; i < 15; i++) {
+        node = node.parentElement;
+        if (!node) break;
+        const uLink = node.querySelector('a[href^="/@"]');
+        if (uLink) {
+            username = (uLink.getAttribute('href') || '').replace(/^\/@/, '').split('/')[0];
+            break;
+        }
+    }
+    // 抓 <time datetime> — 最可靠的時間來源。
+    // 往上爬時一旦容器裡出現第二篇貼文就停止，否則會抓到隔壁貼文的時間。
+    let datetime = '';
+    node = el;
+    for (let i = 0; i < 15; i++) {
+        node = node.parentElement;
+        if (!node) break;
+        const codes = new Set();
+        node.querySelectorAll('a[href*="/post/"]').forEach(a => {
+            const mm = (a.getAttribute('href') || '').match(/\/post\/([A-Za-z0-9_-]+)/);
+            if (mm) codes.add(mm[1]);
+        });
+        if (codes.size > 1) break;
+        const timeEl = node.querySelector('time[datetime]');
+        if (timeEl) { datetime = timeEl.getAttribute('datetime') || ''; break; }
+    }
+    return {text, username, mediaId, datetime};
+}"""
+
+
 def _shortcode_to_id(shortcode: str) -> str:
     n = 0
     for ch in shortcode:
@@ -380,8 +423,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
 
             logger.info(
                 f"[海巡] API 攔截到 {len(api_pk_map)} 個 pk 對應、"
-                f"{len(api_taken_at_map)} 個 taken_at 時間戳 "
-                f"keys={list(api_taken_at_map)[:8]}"
+                f"{len(api_taken_at_map)} 個 taken_at 時間戳"
             )
             my_username = os.environ.get("THREADS_USERNAME", "").lower()
 
@@ -401,49 +443,8 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                         continue
                     seen_shortcodes.add(shortcode)
 
-                    # 用 JavaScript 往上遍歷找貼文文字、帳號、media ID
-                    result = await link_el.evaluate("""el => {
-                        let node = el;
-                        let text = '';
-                        let username = '';
-                        let mediaId = '';
-                        for (let i = 0; i < 15; i++) {
-                            node = node.parentElement;
-                            if (!node) break;
-                            const t = (node.innerText || '').trim();
-                            // 嘗試抓 data-id / data-post-id 等屬性
-                            const did = node.getAttribute('data-id') || node.getAttribute('data-post-id') || node.getAttribute('data-media-id');
-                            if (did && /^\\d{10,}$/.test(did)) mediaId = did;
-                            if (!text && t.length > 50) text = t.slice(0, 500);
-                        }
-                        node = el;
-                        for (let i = 0; i < 15; i++) {
-                            node = node.parentElement;
-                            if (!node) break;
-                            const uLink = node.querySelector('a[href^="/@"]');
-                            if (uLink) {
-                                username = (uLink.getAttribute('href') || '').replace(/^\\/@/, '').split('/')[0];
-                                break;
-                            }
-                        }
-                        // 抓 <time datetime> — 這是最可靠的時間來源。
-                        // 往上爬時一旦容器裡出現第二篇貼文就停止，否則會抓到隔壁貼文的時間。
-                        let datetime = '';
-                        node = el;
-                        for (let i = 0; i < 15; i++) {
-                            node = node.parentElement;
-                            if (!node) break;
-                            const codes = new Set();
-                            node.querySelectorAll('a[href*="/post/"]').forEach(a => {
-                                const mm = (a.getAttribute('href') || '').match(/\\/post\\/([A-Za-z0-9_-]+)/);
-                                if (mm) codes.add(mm[1]);
-                            });
-                            if (codes.size > 1) break;
-                            const timeEl = node.querySelector('time[datetime]');
-                            if (timeEl) { datetime = timeEl.getAttribute('datetime') || ''; break; }
-                        }
-                        return {text: text, username: username, mediaId: mediaId, datetime: datetime};
-                    }""")
+                    # 用 JavaScript 往上遍歷找貼文文字、帳號、media ID、時間
+                    result = await link_el.evaluate(_POST_EXTRACT_JS)
 
                     raw_text = (result.get("text") or "").strip()
                     username = (result.get("username") or "").strip()
@@ -779,6 +780,7 @@ async def search_and_reply_async(
             if not skip_search:
                 api_pk_map: dict[str, str] = {}
                 api_like_map: dict[str, int] = {}
+                api_taken_at_map: dict[str, int] = {}
 
                 async def _capture_pk(response):
                     try:
@@ -795,6 +797,9 @@ async def search_and_reply_async(
                             likes = _extract_like_map(body)
                             if likes:
                                 api_like_map.update(likes)
+                            taken = _extract_taken_at_map(body)
+                            if taken:
+                                api_taken_at_map.update(taken)
                     except Exception:
                         pass
 
@@ -831,27 +836,18 @@ async def search_and_reply_async(
                         if sc in seen:
                             continue
                         seen.add(sc)
-                        result = await link_el.evaluate("""el => {
-                            let node = el, text = '', username = '', mediaId = '';
-                            for (let i = 0; i < 15; i++) {
-                                node = node.parentElement; if (!node) break;
-                                const t = (node.innerText||'').trim();
-                                const did = node.getAttribute('data-id')||node.getAttribute('data-post-id')||node.getAttribute('data-media-id');
-                                if (did && /^\\d{10,}$/.test(did)) mediaId = did;
-                                if (!text && t.length > 50) text = t.slice(0,500);
-                            }
-                            node = el;
-                            for (let i = 0; i < 15; i++) {
-                                node = node.parentElement; if (!node) break;
-                                const uLink = node.querySelector('a[href^="/@"]');
-                                if (uLink) { username=(uLink.getAttribute('href')||'').replace(/^\\/@/,'').split('/')[0]; break; }
-                            }
-                            return {text,username,mediaId};
-                        }""")
+                        result = await link_el.evaluate(_POST_EXTRACT_JS)
                         raw_text = (result.get("text") or "").strip()
                         username = (result.get("username") or "").strip()
                         media_id = api_pk_map.get(sc) or (result.get("mediaId") or "").strip() or _shortcode_to_id(sc)
+                        # 時間來源優先序：DOM <time> > API taken_at > 文字解析
                         text, age_hours = _parse_post_text(raw_text)
+                        taken_at = api_taken_at_map.get(sc)
+                        if taken_at:
+                            age_hours = _age_hours_from_taken_at(taken_at)
+                        dom_age = _age_hours_from_datetime(result.get("datetime") or "")
+                        if dom_age != 9999:
+                            age_hours = dom_age
                         if not text or len(text) < 20 or username.lower() == my_username:
                             continue
                         posts.append(ScrapedPost(
@@ -862,7 +858,13 @@ async def search_and_reply_async(
                     except Exception:
                         pass
 
-                logger.info(f"[海巡] 找到 {len(posts)} 篇貼文")
+                known = [p.age_hours for p in posts if p.age_hours != 9999]
+                logger.info(
+                    f"[海巡] 找到 {len(posts)} 篇貼文"
+                    f"（時間可判斷:{len(known)}/{len(posts)}"
+                    + (f"，最新:{min(known)}h 最舊:{max(known)}h" if known else "")
+                    + f"，7日內:{sum(1 for a in known if a <= 168)} 篇）"
+                )
 
             # 對指定貼文做 UI 回覆
             for task in reply_tasks:
