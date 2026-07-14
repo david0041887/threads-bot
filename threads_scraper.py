@@ -204,40 +204,72 @@ def _is_header_meta(s: str, username: str, is_first_nonblank: bool) -> bool:
     return False
 
 
+def _line_timestamp_age(s: str) -> int | None:
+    """這行若是時間戳（純時間、或行尾「· 5h」「· 16分鐘」），回傳 age_hours，否則 None。"""
+    m = re.match(r'^(\d+)\s*([smhdwy])$', s)
+    if m:
+        return _ts_to_age_hours(int(m.group(1)), m.group(2))
+    m = re.search(r'[·•]\s*(\d+)\s*([smhdwy])\s*$', s)
+    if m:
+        return _ts_to_age_hours(int(m.group(1)), m.group(2))
+    if re.match(r'^(剛剛|just now|now)$', s, re.I):
+        return 1
+    m = re.match(r'^(\d+)\s*(秒|分鐘|分|小時|時|天|日|週|周|個?月|年)\s*前?$', s)
+    if m:
+        return _cn_age_hours(int(m.group(1)), m.group(2))
+    m = re.search(r'[·•]\s*(\d+)\s*(秒|分鐘|分|小時|時|天|日|週|周|個?月|年)\s*前?\s*$', s)
+    if m:
+        return _cn_age_hours(int(m.group(1)), m.group(2))
+    return None
+
+
 def _parse_post_text(raw_text: str, username: str = "") -> tuple[str, int]:
     """清理貼文文字，同時萃取時間戳轉為小時數。回傳 (clean_text, age_hours)。
 
-    只跳過開頭確定是 metadata 的行（帳號/時間/瀏覽數/UI），其餘正文原樣保留 ——
-    包含開頭的短行（條列 1./2./3. 等）。
+    做法：貼文卡片的 innerText 開頭固定是 header（帳號、主題 tag、時間），時間戳
+    永遠是 header 最後一個元素，其後才是正文。所以以「header 內第一個時間戳行」
+    當分界，之後全部視為正文原樣保留（含條列 1./2./3. 這種短行）。
+    沒有 header 時間戳時（少數卡片），退回只跳已知 metadata。
     注意：時間以 DOM <time datetime> 為主，這裡只是後備。
     """
-    lines = raw_text.splitlines()
+    lines = [ln.strip() for ln in raw_text.splitlines()]
     age_hours = 9999
-    i, n = 0, len(lines)
-    first_nb = True
-    while i < n:
-        s = lines[i].strip()
-        # 抓時間（英文 5h / 中文 16分鐘）當後備
-        if age_hours == 9999:
-            ts = re.match(r'^(\d+)\s*([smhdwy])$', s) or re.search(r'·\s*(\d+)\s*([smhdwy])\s*$', s)
-            if ts:
-                age_hours = _ts_to_age_hours(int(ts.group(1)), ts.group(2))
-            else:
-                cts = _CN_TIME.search(s)
-                if cts and _is_header_meta(s, username, first_nb and bool(s)):
-                    age_hours = _cn_age_hours(int(cts.group(1)), cts.group(2))
-        fnb = first_nb and bool(s)
-        if s:
-            first_nb = False
-        if _is_header_meta(s, username, fnb):
-            i += 1
+    boundary = None
+    nonblank = 0
+    for idx, s in enumerate(lines):
+        if not s:
             continue
-        break
-    body = [ln.strip() for ln in lines[i:]]
+        nonblank += 1
+        if nonblank > 6:  # header 很短，只在前幾個非空行裡找時間戳
+            break
+        a = _line_timestamp_age(s)
+        if a is not None:
+            age_hours = a
+            boundary = idx
+            break
+
+    if boundary is not None:
+        body = lines[boundary + 1:]
+    else:
+        # 後備：沒有 header 時間戳，只跳帳號/UI 等已知 metadata
+        i = 0
+        first_nb = True
+        while i < len(lines):
+            s = lines[i]
+            fnb = first_nb and bool(s)
+            if s:
+                first_nb = False
+            if _is_header_meta(s, username, fnb):
+                i += 1
+                continue
+            break
+        body = lines[i:]
+
+    while body and not body[0]:
+        body.pop(0)
     while body and not body[-1]:
         body.pop()
     text = "\n".join(body).strip()
-    # 正文裡若還找得到獨立的英文時間戳行，補抓一次
     if age_hours == 9999:
         m = re.search(r'(?:^|\n)\s*(\d+)\s*([smhdwy])\s*(?:\n|$)', raw_text)
         if m:
