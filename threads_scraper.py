@@ -12,6 +12,7 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure Playwright finds Chromium in the app directory (Railway build artifact)
@@ -62,6 +63,24 @@ def _age_hours_from_taken_at(taken_at: int) -> int:
     """把 API 的 Unix 時間戳換算成貼文年齡（小時）。"""
     age = int((time.time() - taken_at) // 3600)
     return max(0, age)
+
+
+def _age_hours_from_datetime(dt_str: str) -> int:
+    """把 DOM <time datetime="..."> 的 ISO 時間換算成貼文年齡（小時）。
+
+    這是最可靠的來源：時間直接掛在該貼文自己的 DOM 節點上。
+    無法解析時回傳 9999。
+    """
+    if not dt_str:
+        return 9999
+    try:
+        dt = datetime.fromisoformat(dt_str.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+        return max(0, int(age))
+    except Exception:
+        return 9999
 
 
 def _parse_post_text(raw_text: str) -> tuple[str, int]:
@@ -407,7 +426,23 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                                 break;
                             }
                         }
-                        return {text: text, username: username, mediaId: mediaId};
+                        // 抓 <time datetime> — 這是最可靠的時間來源。
+                        // 往上爬時一旦容器裡出現第二篇貼文就停止，否則會抓到隔壁貼文的時間。
+                        let datetime = '';
+                        node = el;
+                        for (let i = 0; i < 15; i++) {
+                            node = node.parentElement;
+                            if (!node) break;
+                            const codes = new Set();
+                            node.querySelectorAll('a[href*="/post/"]').forEach(a => {
+                                const mm = (a.getAttribute('href') || '').match(/\\/post\\/([A-Za-z0-9_-]+)/);
+                                if (mm) codes.add(mm[1]);
+                            });
+                            if (codes.size > 1) break;
+                            const timeEl = node.querySelector('time[datetime]');
+                            if (timeEl) { datetime = timeEl.getAttribute('datetime') || ''; break; }
+                        }
+                        return {text: text, username: username, mediaId: mediaId, datetime: datetime};
                     }""")
 
                     raw_text = (result.get("text") or "").strip()
@@ -419,15 +454,18 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     )
                     logger.debug(f"[海巡] shortcode={shortcode} media_id={media_id} (api_map={bool(api_pk_map.get(shortcode))})")
 
+                    # 時間來源優先序：DOM <time> > API taken_at > 文字解析
                     text, age_hours = _parse_post_text(raw_text)
-                    # API 的 taken_at 優先，文字解析只是後備
+                    source = "文字" if age_hours != 9999 else "無"
                     taken_at = api_taken_at_map.get(shortcode)
                     if taken_at:
                         age_hours = _age_hours_from_taken_at(taken_at)
-                    logger.info(
-                        f"[海巡診斷] shortcode={shortcode} "
-                        f"taken_at={'命中' if taken_at else '未命中'} age_hours={age_hours}"
-                    )
+                        source = "API"
+                    dom_age = _age_hours_from_datetime(result.get("datetime") or "")
+                    if dom_age != 9999:
+                        age_hours = dom_age
+                        source = "DOM"
+                    logger.info(f"[海巡時間] {shortcode} 來源={source} age_hours={age_hours}")
 
                     if not text or len(text) < 20:
                         continue
