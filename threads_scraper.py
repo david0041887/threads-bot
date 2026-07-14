@@ -161,36 +161,88 @@ def _age_hours_from_datetime(dt_str: str) -> int:
         return 9999
 
 
-def _parse_post_text(raw_text: str) -> tuple[str, int]:
+# 貼文開頭要跳過的 metadata：時間、瀏覽數、UI 按鈕。
+_TIME_LINE = re.compile(
+    r'^(剛剛|just now|now|\d+\s*(?:[smhdwy]|秒|分鐘|分|小時|時|天|日|週|周|個?月|年)\s*前?)$', re.I)
+_VIEW_LINE = re.compile(r'\d[\d,\.]*\s*(?:次瀏覽|瀏覽|views?)$', re.I)
+_UI_LINE = re.compile(
+    r'^(追蹤|已追蹤|追蹤中|Follow|Following|翻譯|查看翻譯|顯示翻譯|See translation|更多|…\s*更多|More|[·•])$', re.I)
+_HANDLE_LINE = re.compile(r'^@?[a-zA-Z0-9_.]{2,30}$')  # 純 ASCII 才算 handle，不會誤傷中文短行
+_CN_TIME = re.compile(r'(\d+)\s*(秒|分鐘|分|小時|時|天|日|週|周|個?月|年)')
+
+
+def _cn_age_hours(n: int, unit: str) -> int:
+    if unit in ("秒", "分鐘", "分"):
+        return 1
+    return {"小時": 1, "時": 1, "天": 24, "日": 24, "週": 168, "周": 168,
+            "月": 720, "個月": 720, "年": 8760}.get(unit, 1) * n
+
+
+def _is_header_meta(s: str, username: str, is_first_nonblank: bool) -> bool:
+    """判斷這行是否為貼文開頭的 metadata（帳號 / 時間 / 瀏覽數 / UI 按鈕）。
+
+    只比對已知樣式，不用「長度 < N」這種粗規則 —— 那會把「1.xxx」「自負額」這類
+    合法的短正文行當成 metadata 吃掉，害整篇看起來像別人的留言片段。
+    """
+    if not s:
+        return True
+    base = s.lower().lstrip("@")
+    if username:
+        ul = username.lower()
+        if base == ul:
+            return True
+        # "handle · 16分鐘" / "handle16分鐘" 同一行的情況
+        if base.startswith(ul):
+            rest = base[len(ul):].lstrip(" ·•|").strip()
+            if rest == "" or _TIME_LINE.match(rest):
+                return True
+    if _TIME_LINE.match(s) or _VIEW_LINE.search(s) or _UI_LINE.match(s):
+        return True
+    # username 抓取失敗時的後備：僅對第一個非空行，且必須長得像純 ASCII handle
+    if is_first_nonblank and not username and _HANDLE_LINE.match(s):
+        return True
+    return False
+
+
+def _parse_post_text(raw_text: str, username: str = "") -> tuple[str, int]:
     """清理貼文文字，同時萃取時間戳轉為小時數。回傳 (clean_text, age_hours)。
 
-    注意：這是時間的「後備」來源，版面一變就抓不到。優先使用 API 攔截到的
-    taken_at（見 _extract_taken_at_map）。
+    只跳過開頭確定是 metadata 的行（帳號/時間/瀏覽數/UI），其餘正文原樣保留 ——
+    包含開頭的短行（條列 1./2./3. 等）。
+    注意：時間以 DOM <time datetime> 為主，這裡只是後備。
     """
     lines = raw_text.splitlines()
-    clean_lines = []
     age_hours = 9999
-    skipping = True
-    for line in lines:
-        s = line.strip()
-        if skipping:
-            if not s:
-                continue
-            # 時間戳可能自成一行（"5h"），也可能夾在分隔線裡（"帳號 · 5h"）
+    i, n = 0, len(lines)
+    first_nb = True
+    while i < n:
+        s = lines[i].strip()
+        # 抓時間（英文 5h / 中文 16分鐘）當後備
+        if age_hours == 9999:
             ts = re.match(r'^(\d+)\s*([smhdwy])$', s) or re.search(r'·\s*(\d+)\s*([smhdwy])\s*$', s)
             if ts:
                 age_hours = _ts_to_age_hours(int(ts.group(1)), ts.group(2))
-                continue
-            if len(s) < 15 or re.match(r'^@?\w{1,20}$', s):
-                continue
-            skipping = False
-        clean_lines.append(s)
-    # 正文裡若還找得到獨立的時間戳行，補抓一次（版面把時間放在文字後面時）
+            else:
+                cts = _CN_TIME.search(s)
+                if cts and _is_header_meta(s, username, first_nb and bool(s)):
+                    age_hours = _cn_age_hours(int(cts.group(1)), cts.group(2))
+        fnb = first_nb and bool(s)
+        if s:
+            first_nb = False
+        if _is_header_meta(s, username, fnb):
+            i += 1
+            continue
+        break
+    body = [ln.strip() for ln in lines[i:]]
+    while body and not body[-1]:
+        body.pop()
+    text = "\n".join(body).strip()
+    # 正文裡若還找得到獨立的英文時間戳行，補抓一次
     if age_hours == 9999:
         m = re.search(r'(?:^|\n)\s*(\d+)\s*([smhdwy])\s*(?:\n|$)', raw_text)
         if m:
             age_hours = _ts_to_age_hours(int(m.group(1)), m.group(2))
-    return ("\n".join(clean_lines).strip() or raw_text), age_hours
+    return (text or raw_text.strip()), age_hours
 
 
 _TS_PATTERN = re.compile(r'"taken_at"\s*:\s*(\d{10})')
@@ -517,7 +569,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                     logger.debug(f"[海巡] shortcode={shortcode} media_id={media_id} (api_map={bool(api_pk_map.get(shortcode))})")
 
                     # 時間來源優先序：DOM <time> > API taken_at > 文字解析
-                    text, age_hours = _parse_post_text(raw_text)
+                    text, age_hours = _parse_post_text(raw_text, username)
                     source = "文字" if age_hours != 9999 else "無"
                     taken_at = api_taken_at_map.get(shortcode)
                     if taken_at:
@@ -618,7 +670,7 @@ async def get_profile_posts_async(username: str, limit: int = 50) -> list[Scrape
                     uname = (result.get("username") or "").strip()
                     if not raw_text or len(raw_text) < 20:
                         continue
-                    text, age_hours = _parse_post_text(raw_text)
+                    text, age_hours = _parse_post_text(raw_text, uname)
                     posts.append(ScrapedPost(shortcode=sc, text=text, username=uname, age_hours=age_hours))
                     if len(posts) >= limit:
                         break
@@ -867,7 +919,7 @@ async def search_and_reply_async(
                         username = (result.get("username") or "").strip()
                         media_id = api_pk_map.get(sc) or (result.get("mediaId") or "").strip() or _shortcode_to_id(sc)
                         # 時間來源優先序：DOM <time> > API taken_at > 文字解析
-                        text, age_hours = _parse_post_text(raw_text)
+                        text, age_hours = _parse_post_text(raw_text, username)
                         age_source = "文字" if age_hours != 9999 else "無"
                         taken_at = api_taken_at_map.get(sc)
                         if taken_at:
