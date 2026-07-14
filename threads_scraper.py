@@ -23,6 +23,22 @@ from playwright.async_api import async_playwright
 logger = logging.getLogger(__name__)
 
 COOKIES_FILE = "threads_cookies.json"
+
+# 對齊真實 Chrome 的瀏覽器環境。舊版寫 Chrome/124（落後二十幾個版本）且未設
+# 語言與時區，等於自稱「兩年前的舊瀏覽器 + 英語系 UTC 使用者」——Threads 因此
+# 給了不同待遇（filter=recent 被洗掉），台灣相關性也偏掉（港澳內容混入）。
+# UA 版本取自 2026-07 使用者實機 Chrome 的 navigator.userAgent。
+_REAL_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/150.0.0.0 Safari/537.36"
+)
+_CONTEXT_OPTS = {
+    "user_agent": _REAL_CHROME_UA,
+    "viewport": {"width": 1280, "height": 900},
+    "locale": "zh-TW",
+    "timezone_id": "Asia/Taipei",
+}
 # Threads/Instagram shortcode 字母表（與 Instagram 相同）
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -229,6 +245,30 @@ def _extract_taken_at_map(json_text: str) -> dict[str, int]:
     return taken_map
 
 
+async def _is_logged_in(page, context) -> bool:
+    """判斷是否真的登入 Threads。
+
+    **不能用 URL 判斷。** 未登入時 threads.com/ 並不會導向 /login，而是直接
+    顯示公開首頁，所以舊版的 `"login" in current_url` 永遠是 False —— 等於
+    不管 cookie 有沒有失效都回報「已登入」。海巡因此長期在未登入狀態下空轉，
+    而未登入的 Threads 會忽略 filter=recent、只給相關性排序的舊文。
+
+    可靠指標（2026-07 實測對照真實瀏覽器與未登入 Playwright）：
+    - 已登入：cookie 有 ds_user_id；頁面有「新串文」撰寫入口
+    - 未登入：cookie 只有 csrftoken / ig_did / mid；頁面有登入按鈕
+    """
+    try:
+        names = {c["name"] for c in await context.cookies()}
+        if "ds_user_id" in names:
+            return True
+        # cookie 判斷不到時退而求其次看 DOM
+        composer = await page.query_selector('svg[aria-label="新串文"], [aria-label*="新串文"]')
+        return composer is not None
+    except Exception as e:
+        logger.warning(f"[海巡] 登入狀態判斷失敗，保守視為未登入: {e}")
+        return False
+
+
 async def _ensure_logged_in(page, context) -> bool:
     # 優先使用 THREADS_COOKIES 環境變數（從真實瀏覽器匯出）
     cookies_env = os.environ.get("THREADS_COOKIES", "")
@@ -266,34 +306,33 @@ async def _ensure_logged_in(page, context) -> bool:
     current_url = page.url
     logger.info(f"[海巡] threads.com 目前 URL: {current_url}")
 
-    if "login" in current_url.lower() or "challenge" in current_url.lower():
-        logger.warning(f"[海巡] 未登入（URL: {current_url}），嘗試帳密登入")
-        username = os.environ.get("THREADS_USERNAME", "")
-        password = os.environ.get("THREADS_PASSWORD", "")
-        if not username or not password:
-            logger.error("[海巡] THREADS_USERNAME / THREADS_PASSWORD 未設定")
-            return False
-        try:
-            await page.goto("https://www.threads.com/login", wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_selector('input[autocomplete="username"]', timeout=15000)
-            await page.fill('input[autocomplete="username"]', username)
-            await page.fill('input[type="password"]', password)
-            await page.press('input[type="password"]', "Enter")
-            await asyncio.sleep(5)
-            final_url = page.url
-            logger.info(f"[海巡] 登入後 URL: {final_url}")
-            if "challenge" in final_url or "login" in final_url:
-                logger.error("[海巡] 登入被 Instagram 安全驗證擋住，需手動提供 THREADS_COOKIES")
-                return False
-            Path(COOKIES_FILE).write_text(json.dumps(await context.cookies()))
-            logger.info("[海巡] 登入成功")
-            return True
-        except Exception as e:
-            logger.error(f"[海巡] 登入失敗: {e}")
-            return False
+    if await _is_logged_in(page, context):
+        logger.info("[海巡] 已登入（ds_user_id 存在）")
+        return True
 
-    logger.info("[海巡] 已登入")
-    return True
+    logger.warning("[海巡] 未登入：THREADS_COOKIES 已失效或未設定，嘗試帳密登入")
+    username = os.environ.get("THREADS_USERNAME", "")
+    password = os.environ.get("THREADS_PASSWORD", "")
+    if not username or not password:
+        logger.error("[海巡] THREADS_USERNAME / THREADS_PASSWORD 未設定")
+        return False
+    try:
+        await page.goto("https://www.threads.com/login", wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_selector('input[autocomplete="username"]', timeout=15000)
+        await page.fill('input[autocomplete="username"]', username)
+        await page.fill('input[type="password"]', password)
+        await page.press('input[type="password"]', "Enter")
+        await asyncio.sleep(5)
+        logger.info(f"[海巡] 登入後 URL: {page.url}")
+        if not await _is_logged_in(page, context):
+            logger.error("[海巡] 帳密登入失敗（Instagram 多半會擋密碼登入），請更新 THREADS_COOKIES")
+            return False
+        Path(COOKIES_FILE).write_text(json.dumps(await context.cookies()))
+        logger.info("[海巡] 帳密登入成功")
+        return True
+    except Exception as e:
+        logger.error(f"[海巡] 帳密登入失敗: {e}")
+        return False
 
 
 def _extract_pk_map(json_text: str) -> dict[str, str]:
@@ -368,14 +407,7 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 900},
-        )
+        context = await browser.new_context(**_CONTEXT_OPTS)
 
         cookies_path = Path(COOKIES_FILE)
         if cookies_path.exists():
@@ -519,14 +551,7 @@ async def get_profile_posts_async(username: str, limit: int = 50) -> list[Scrape
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 900},
-        )
+        context = await browser.new_context(**_CONTEXT_OPTS)
         page = await context.new_page()
 
         try:
@@ -745,14 +770,7 @@ async def search_and_reply_async(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 900},
-        )
+        context = await browser.new_context(**_CONTEXT_OPTS)
 
         # 載入 cookies
         cookies_env = os.environ.get("THREADS_COOKIES", "")
