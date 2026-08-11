@@ -147,7 +147,11 @@ def _ensure_chromium():
 async def lifespan(app: FastAPI):
     state.init_db()
     _ensure_chromium()
-    scheduler.add_job(refresh_token_job, CronTrigger(month="*/2", day="1", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
+    # Token 效期 60 天。原本設 month="*/2", day="1"（每兩個月 1 號）＝間隔 59～62 天，
+    # 遇到大月必定晚於過期日（實際事故：token 6/29 過期，刷新排在 7/01），
+    # 而過期的 token 無法再 refresh，系統會就此永久停擺。改為每月 1、15 號，容錯 4 次。
+    scheduler.add_job(refresh_token_job, CronTrigger(day="1,15", hour=3, minute=0, timezone="Asia/Taipei"), id="token_refresh", replace_existing=True)
+    scheduler.add_job(token_health_job, CronTrigger(hour=9, minute=30, timezone="Asia/Taipei"), id="token_health", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_processed_ids(days=90), CronTrigger(day_of_week="sun", hour=4, minute=30, timezone="Asia/Taipei"), id="processed_ids_cleanup", replace_existing=True)
     # 依 state 裡的 flag 決定海巡 / 留言輪詢是否啟動（跨部署記住）
@@ -404,10 +408,66 @@ async def refresh_token_job():
         # 同時寫 state.kv（跨部署保留）+ os.environ（當前 process 立即生效）
         state.set_kv("threads_access_token", new_token)
         os.environ["THREADS_ACCESS_TOKEN"] = new_token
+        state.set_kv("token_refreshed_at", _today_taipei())
         client.close()
         logger.info("Token 刷新成功，已寫入 state.kv")
     except Exception as e:
         notify_error(f"Token 刷新失敗: {e}")
+
+
+def _today_taipei() -> str:
+    from datetime import datetime
+    import pytz
+    return datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d")
+
+
+async def token_health_job():
+    """每日檢查 token 是否還活著，失效就發 TG 警告。
+
+    Token 一旦過期就無法再 refresh，必須人工重新授權。沒有這道檢查的話系統會靜默停擺
+    ——實際事故：token 於 2026-06-29 過期，43 天後才在一次人工測試中被發現。
+    """
+    import httpx
+    token = state.get_kv("threads_access_token", None) or os.environ.get("THREADS_ACCESS_TOKEN", "")
+    if not token:
+        send_telegram("🔴 Threads token 未設定，發文與留言回覆均無法運作")
+        return
+
+    try:
+        resp = httpx.get(
+            "https://graph.threads.net/v1.0/me",
+            params={"fields": "id,username", "access_token": token},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            last = state.get_kv("token_refreshed_at", None)
+            logger.info(f"[Token健康] 有效，上次刷新：{last or '未記錄'}")
+            if last:
+                from datetime import date
+                y, m, d = (int(x) for x in last.split("-"))
+                age = (date.fromisoformat(_today_taipei()) - date(y, m, d)).days
+                if age >= 45:
+                    send_telegram(
+                        f"⚠️ Threads token 已 {age} 天未刷新（效期 60 天）\n"
+                        f"自動刷新排程在每月 1、15 號。若連續未刷新請檢查 /admin/env-check。"
+                    )
+            return
+
+        err = resp.json().get("error", {})
+        msg = err.get("message", resp.text[:200])
+        logger.error(f"[Token健康] 失效：{msg}")
+        send_telegram(
+            "🔴 Threads Token 已失效，機器人停擺中\n\n"
+            f"錯誤：{msg}\n\n"
+            "過期的 token 無法自動刷新，需手動重新授權：\n"
+            "1. Meta Developer Console → Threads API → 產生新的 short-lived token\n"
+            "2. 換發 60 天 long-lived token\n"
+            "3. 更新 Railway 環境變數 THREADS_ACCESS_TOKEN\n"
+            "4. 呼叫 POST /admin/reset-token-cache（必要！否則 state.kv 的舊 token 仍會被優先使用）"
+        )
+    except Exception as e:
+        logger.error(f"[Token健康] 檢查失敗: {e}")
+        _notify_error_throttled("token_health", str(e))
 
 
 @app.post("/approve-reply/{reply_job_id}/{action}")
@@ -731,6 +791,47 @@ async def admin_stats():
 async def env_check():
     keys = [k for k in os.environ if "THREAD" in k.upper() or "TELEGRAM" in k.upper() or "ANTHROPIC" in k.upper() or "PLAYWRIGHT" in k.upper()]
     return {"keys_found": sorted(keys)}
+
+
+@app.get("/admin/token-health")
+async def token_health():
+    """手動觸發 token 健康檢查（結果同時發 Telegram）。"""
+    await token_health_job()
+    return {"status": "checked", "source": "state.kv" if state.get_kv("threads_access_token") else "env"}
+
+
+@app.post("/admin/reset-token-cache")
+async def reset_token_cache():
+    """清掉 state.kv 裡快取的 token，讓系統改用環境變數中的新 token。
+
+    _current_access_token() 是 state.kv 優先於環境變數，所以在 Railway 更新
+    THREADS_ACCESS_TOKEN 後「必須」呼叫這支，否則舊 token 會繼續被優先使用
+    （重新部署也救不了——state.kv 存在持久化 Volume 裡）。
+    """
+    had_cached = bool(state.get_kv("threads_access_token"))
+    state.set_kv("threads_access_token", None)
+    env_token = os.environ.get("THREADS_ACCESS_TOKEN", "")
+    if not env_token:
+        return {"status": "cleared", "had_cached": had_cached, "warning": "環境變數 THREADS_ACCESS_TOKEN 是空的"}
+
+    import httpx
+    try:
+        resp = httpx.get(
+            "https://graph.threads.net/v1.0/me",
+            params={"fields": "id,username", "access_token": env_token},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            state.set_kv("token_refreshed_at", _today_taipei())
+            send_telegram(f"✅ Token 已更新並驗證通過：@{resp.json().get('username', '?')}")
+            return {"status": "ok", "had_cached": had_cached, "me": resp.json()}
+        return {
+            "status": "env_token_invalid",
+            "had_cached": had_cached,
+            "error": resp.json().get("error", {}).get("message", resp.text[:200]),
+        }
+    except Exception as e:
+        return {"status": "check_failed", "had_cached": had_cached, "error": str(e)}
 
 
 @app.get("/admin/test-search")
