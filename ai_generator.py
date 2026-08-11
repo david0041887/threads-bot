@@ -640,7 +640,12 @@ _COMPLIANCE_RULES = """
 【台灣保險業務員管理規範（保險法第 163 條相關）】
 1. 不得以不實、誇大或易使人誤解的方式描述保險商品
 2. 不得保證保險契約收益，不得以過去績效暗示未來報酬
-3. 不得提及已停售商品：失能險、副本實支實付
+3. 不得提及已停售商品，僅限以下兩者，禁止擴大解釋：
+   (a)「副本實支實付」——必須「副本」二字與「實支實付」同時出現才算違規。
+       ⚠️「實支實付」本身是現售主力商品，是合規詞彙，單獨出現一律視為合規，
+       不得改寫成「醫療保障」「保額」等替代詞。連帶「雜費」「雜費上限」「額度」皆合規。
+   (b)「失能險 / 失能扶助險」的新購推薦。
+       ⚠️ 討論勞保失能給付、長照需求、失能狀態本身，皆為合規，不得攔截。
 4. 只能使用「重大傷病險」，不得使用「重大疾病險」
 5. 不得點名比較特定保險公司或商品
 6. 不得以贈品或其他利益招攬保險
@@ -680,11 +685,22 @@ def check_compliance(text: str) -> dict:
     回傳 {"compliant": bool, "issues": list[str], "fixed_text": str}
     若無違規，fixed_text 與原文相同。
     """
-    system = "你是台灣保險法規與 Meta 社群規範的合規審查員。只輸出 JSON，不加任何說明或 markdown。"
+    system = (
+        "你是台灣保險法規與 Meta 社群規範的合規審查員。"
+        "你的職責是「守門」，不是「潤稿」——只挑出明確違反下列條列規則的字句，"
+        "規則沒寫到的一律視為合規。口語、直白、不客氣的語氣都不是違規，不得因此改寫。"
+        "只輸出 JSON，不加任何說明或 markdown。"
+    )
     user = f"""請審查以下內容，確認是否違反規定，並輸出修正版本。
 
 合規規則：
 {_COMPLIANCE_RULES}
+
+⚠️ 過度攔截與漏抓同樣是失職。判定前先自問：
+「這句話違反的是上面『哪一條』規則？」講不出條號就是合規，compliant 必須為 true。
+特別注意：專有名詞只有在完全符合規則描述的形態時才算違規，
+不要因為某個詞「聽起來像」禁用商品就攔（例：「實支實付」合規，只有「副本實支實付」違規）。
+若判定合規，fixed_text 必須與原文逐字相同，一個字都不要改。
 
 待審查內容：
 {text}
@@ -709,9 +725,51 @@ def check_compliance(text: str) -> dict:
         return {"compliant": True, "issues": [], "fixed_text": text}
 
 
-def _apply_compliance(text: str) -> str:
-    """審查並回傳合規後的文字。若審查失敗，回傳原文。"""
+def _apply_compliance(
+    text: str,
+    regen_system: Optional[str] = None,
+    regen_user: Optional[str] = None,
+    max_tokens: int = 1000,
+) -> str:
+    """審查並回傳合規後的文字。若審查失敗，回傳原文。
+
+    合規模組是「守門員」不是「改寫者」——審查模型（Haiku）不帶 persona 與語氣規則，
+    讓它改寫等於把有血有肉的句子洗成空泛廢話（實測：「實支實付的雜費上限差很多」
+    被改成「醫療保障的保額上限差很多」）。因此：
+
+    - 判定合規 → 原文直出，完全不讓審查模型碰。
+    - 判定違規 → 若呼叫端提供了原始 system/user，帶著違規理由交回「原生成模型」重寫，
+      語氣與字數規則因此得以保留；重寫後再驗一次，仍違規才退回審查模型的改寫版（fail-safe）。
+    """
     result = check_compliance(text)
+    issues = result.get("issues") or []
+    if result.get("compliant", True) and not issues:
+        return text
+
+    if regen_system:
+        try:
+            regen = _call_claude(
+                regen_system + (
+                    "\n\n━━━ 合規重寫 ━━━\n"
+                    "你上一版觸犯了合規規則，必須重寫。\n"
+                    "只針對被指出的問題調整用字，其餘一律保留——"
+                    "語氣、句長、換行、口語感、反問結尾都不准變。\n"
+                    "不要為了安全而抽象化：把具體名詞換成「醫療保障」「相關規劃」這類空話，"
+                    "視同重寫失敗。直接輸出重寫後的內容，不要任何說明。"
+                ),
+                f"{regen_user}\n\n──────\n你上一版的回覆：\n{text}\n\n"
+                f"合規審查指出的問題：{'；'.join(issues)}\n\n請重寫。",
+                max_tokens=max_tokens,
+            )
+            recheck = check_compliance(regen)
+            if recheck.get("compliant", True) and not (recheck.get("issues") or []):
+                logger.info(f"[合規] 重寫後通過：{issues}")
+                return regen
+            logger.warning(f"[合規] 重寫後仍違規，退回審查模型改寫版：{recheck.get('issues')}")
+            return recheck.get("fixed_text") or regen
+        except Exception as e:
+            logger.error(f"[合規] 重寫失敗，退回審查模型改寫版: {e}")
+
     return result.get("fixed_text") or text
 
 
@@ -911,9 +969,19 @@ def generate_post_drafts(source_articles: list[dict], count: int = 3) -> list[di
     clean = raw.replace("```json", "").replace("```", "").strip()
     drafts = json.loads(clean)[:count]
 
-    # 合規審查並修正每篇草稿
+    # 合規審查並修正每篇草稿（違規時交回原生成模型重寫，避免語氣被審查模型洗掉）
+    # 注意：不能沿用上面的 system——它要求輸出 JSON array，重寫會回傳 JSON 而不是純文字。
+    regen_system = f"""{ACCOUNT_PERSONA}
+
+你在修正一篇已寫好的 Threads 貼文草稿，只處理合規問題。
+保留原本的骨架、語氣、段落換行、具體數字與立場，輸出純文字內文，不要 JSON、不要任何說明。"""
     for d in drafts:
-        d["draft"] = _apply_compliance(d["draft"])
+        d["draft"] = _apply_compliance(
+            d["draft"],
+            regen_system=regen_system,
+            regen_user=f"這篇草稿的切入角度是：{d.get('angle', '')}",
+            max_tokens=1200,
+        )
 
     return drafts
 
@@ -962,7 +1030,11 @@ def generate_reply(
 - 若對方明顯想深談：「可以聊，你私訊我說一下你的狀況」
 
 ━━━ 規則 ━━━
-- 最多 2～3 句，50 字以內最理想
+- 整則 60 字以內（含標點），這是硬上限；閒聊類 20 字內收掉
+- 一則只講一個點。想到三件事只挑最有感的那件，其餘留到私訊再說
+  （寫成三段就是失敗——那是業務在做簡報，不是真人在回留言）
+- 講具體的東西：金額級距、實際會發生的狀況、對方沒想到的那個點
+  （抽象詞如「醫療保障」「相關規劃」「平衡風險」等於沒講，寧可不寫）
 - 不加 hashtag，不加引號
 - 直接輸出回覆文字，不加任何前綴
 - 適當換行，不要全部連在一起
@@ -975,7 +1047,7 @@ def generate_reply(
 {history_section}@{commenter_username}：{comment_text}"""
 
     reply = _call_claude(system, context, max_tokens=300)
-    return _apply_compliance(reply)
+    return _apply_compliance(reply, regen_system=system, regen_user=context, max_tokens=300)
 
 
 def is_patrol_worthy(post_text: str) -> bool:
@@ -1128,7 +1200,7 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
         # 步驟三
         if not _reply_passes_quality_gate(cleaned):
             return ""
-        return _apply_compliance(cleaned)
+        return _apply_compliance(cleaned, regen_system=system, regen_user=user, max_tokens=200)
     except Exception as e:
         logger.error(f"主動回覆生成失敗: {e}")
         return ""
