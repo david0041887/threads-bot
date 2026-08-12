@@ -93,6 +93,25 @@ def _notify_error_throttled(category: str, msg: str, cooldown_seconds: int = 360
     notify_error(f"[{category}] {msg}")
 
 
+def _notify_on_state_change(category: str, ok: bool, fail_msg: str, ok_msg: str | None = None) -> None:
+    """邊緣觸發通知：只在狀態翻轉時通知，持續同一狀態時保持安靜。
+
+    適用於「壞掉後不會自己好、要人工介入」的狀況（cookie 失效、憑證過期）。
+    時間節流不適合這類問題：問題持續多久就洗版多久，訊息又完全一樣，
+    最後的結果是使用者對通知麻痺，或誤以為系統瘋了。
+    """
+    key = f"state_ok_{category}"
+    prev = state.get_kv(key, None)  # None = 尚無紀錄（首次判定也要通知）
+    if prev == ok:
+        logger.info(f"[{category}] 狀態未變（ok={ok}），不重複通知")
+        return
+    state.set_kv(key, ok)
+    if ok:
+        send_telegram(ok_msg or f"✅ {category} 已恢復正常")
+    else:
+        send_telegram(fail_msg)
+
+
 def get_client() -> ThreadsClient:
     return ThreadsClient(
         access_token=_current_access_token(),
@@ -294,8 +313,20 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
             if force:
                 send_telegram(msg)
             else:
-                _notify_error_throttled("patrol_not_logged_in", msg)
+                # 邊緣觸發：cookie 失效是「持續狀態」不是「偶發事件」，在人工更新 cookie 前
+                # 每次海巡都會失敗。原本用 1 小時節流仍等於每天洗 15 則相同訊息
+                # （實際事故：開排程一夜，隔天早上滿屏錯誤，被誤判成系統掛掉）。
+                # 改為只在「由正常轉為失效」時通知一次，恢復時再通知一次。
+                _notify_on_state_change("patrol_login", ok=False, fail_msg=msg)
             return
+
+        # 走到這裡代表登入是好的：若先前處於失效狀態，通知一次「已恢復」後翻回正常
+        _notify_on_state_change(
+            "patrol_login",
+            ok=True,
+            fail_msg="",
+            ok_msg="✅ 海巡登入已恢復，THREADS_COOKIES 生效中",
+        )
     except Exception as e:
         logger.error(f"[海巡] 爬蟲搜尋失敗: {e}")
         if force:
