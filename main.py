@@ -55,6 +55,15 @@ SEARCH_KEYWORDS = [
 
 PATROL_MAX_AGE_HOURS = 168   # 只推播 7 天內的貼文（7×24）
 
+# 排程間隔（抽成常數：原本 minutes=10 在 lifespan 與 TG「海巡繼續」各寫一份，
+# 改一處另一處沒跟上就會靜默不一致）
+POLL_REPLIES_INTERVAL_MINUTES = 2
+# 海巡間隔。原為 10 分鐘＝一天 144 次，但推播窗口是 7 天，這個頻率從一開始就過度設計。
+# 高頻自動存取會讓 Threads session 被 Meta 判定異常並全域作廢：實測排程關閉時 cookie 撐 4 週，
+# 開成 10 分鐘後只撐 13 小時與 29 小時。改為 2 小時（一天 12 次，請求量 -92%），
+# 對發現速度的影響最多 2 小時，相對 7 天窗口可忽略。
+PATROL_INTERVAL_HOURS = 2
+
 # 每日海巡配額
 PATROL_SCHEDULE = {
     "noon":    {"hour": "12-13", "count": 7},
@@ -175,8 +184,8 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(lambda: state.cleanup_old_processed_ids(days=90), CronTrigger(day_of_week="sun", hour=4, minute=30, timezone="Asia/Taipei"), id="processed_ids_cleanup", replace_existing=True)
     # 依 state 裡的 flag 決定海巡 / 留言輪詢是否啟動（跨部署記住）
     if state.get_kv("schedulers_enabled", False):
-        scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-        scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=10), id="proactive_patrol", replace_existing=True)
+        scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=POLL_REPLIES_INTERVAL_MINUTES), id="poll_replies", replace_existing=True)
+        scheduler.add_job(proactive_patrol_job, IntervalTrigger(hours=PATROL_INTERVAL_HOURS), id="proactive_patrol", replace_existing=True)
         logger.info("[持久化] schedulers_enabled=True，海巡 / 留言輪詢已自動啟動")
     scheduler.start()
     logger.info("Scheduler 啟動")
@@ -634,8 +643,8 @@ async def telegram_message_handler(request: Request):
 
     if text == "海巡繼續":
         try:
-            scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=2), id="poll_replies", replace_existing=True)
-            scheduler.add_job(proactive_patrol_job, IntervalTrigger(minutes=10), id="proactive_patrol", replace_existing=True)
+            scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=POLL_REPLIES_INTERVAL_MINUTES), id="poll_replies", replace_existing=True)
+            scheduler.add_job(proactive_patrol_job, IntervalTrigger(hours=PATROL_INTERVAL_HOURS), id="proactive_patrol", replace_existing=True)
             state.set_kv("schedulers_enabled", True)
             send_telegram("▶️ 海巡與留言回覆已恢復（狀態已保存，跨部署生效）")
         except Exception as e:
