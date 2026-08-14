@@ -53,15 +53,23 @@ SEARCH_KEYWORDS = [
     "保單健檢", "找保經", "保經公司", "想換業務", "業務離職",
 ]
 
-PATROL_MAX_AGE_HOURS = 168   # 只推播 7 天內的貼文（7×24）
+# 只推播這個時數內的貼文。原為 168（7 天）—— 對「找剛發文的人搭話」這個目的來說太寬，
+# 三天前的求助多半已經有人接手，這時候留言價值極低。
+# 下限受海巡間隔牽制：窗口必須明顯大於 PATROL_INTERVAL_HOURS，否則貼文會在兩次海巡的空檔中
+# 老化超標而永遠抓不到。目前 2 小時跑一次，6 小時的窗口讓每篇貼文有約 3 次被掃到的機會。
+PATROL_MAX_AGE_HOURS = 6
 
 # 排程間隔（抽成常數：原本 minutes=10 在 lifespan 與 TG「海巡繼續」各寫一份，
 # 改一處另一處沒跟上就會靜默不一致）
 POLL_REPLIES_INTERVAL_MINUTES = 2
-# 海巡間隔。原為 10 分鐘＝一天 144 次，但推播窗口是 7 天，這個頻率從一開始就過度設計。
-# 高頻自動存取會讓 Threads session 被 Meta 判定異常並全域作廢：實測排程關閉時 cookie 撐 4 週，
-# 開成 10 分鐘後只撐 13 小時與 29 小時。改為 2 小時（一天 12 次，請求量 -92%），
-# 對發現速度的影響最多 2 小時，相對 7 天窗口可忽略。
+# 海巡間隔。這個值同時被兩股力量拉扯，改動前先想清楚：
+#   往上（間隔拉長）＝ session 活得久。高頻自動存取會讓 Threads session 被 Meta 判定異常並
+#     全域作廢（不是 IP 被擋，本機用同一份 cookie 也登不進去）。實測：排程關閉時 cookie 撐約
+#     4 週；開成 10 分鐘（一天 144 次）只撐 13 小時與 29 小時。
+#   往下（間隔縮短）＝ 推播的貼文更新鮮。貼文最壞情況會等滿一個間隔才被看到，
+#     所以「發文 1 小時內就推播」實質要求間隔 ≦ 1 小時。
+# 目前取 2 小時（一天 12 次，請求量 -92%）先驗證 session 能否存活；
+# 若這份 cookie 撐過一週，再考慮降到 1 小時換取新鮮度（同時 PATROL_MAX_AGE_HOURS 也要一起縮）。
 PATROL_INTERVAL_HOURS = 2
 
 # 每日海巡配額
@@ -357,7 +365,11 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
             )
         return
 
-    random.shuffle(results)
+    # 最新優先。原本是 random.shuffle(results) —— Threads 用 filter=recent 回來的結果本來就
+    # 依時間排好，洗牌等於把「新」這個唯一有價值的排序親手丟掉，接著只取前 3 篇，
+    # 結果就是明明有 10 分鐘前的貼文，推播出去的卻是三天前的。
+    # 時間不明（9999）排最後，反正下面會被擋掉。
+    results.sort(key=lambda p: p.age_hours)
 
     # ── Phase 2：過濾 → 推播新貼文給用戶 ───────────────
     # 使用獨立 namespace "patrol_push"，不受舊 auto-reply 記錄干擾
@@ -373,7 +385,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
             skip_reply += 1
             state.mark_processed("patrol_push", post.shortcode)  # 標記避免重複判斷
             continue
-        # 時間解析失敗（9999）一律擋：無法確認是否在 7 日內就不推
+        # 時間解析失敗（9999）一律擋：無法確認新舊就不推
         if post.age_hours == 9999:
             skip_no_age += 1
             continue
@@ -398,7 +410,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     if known_ages:
         age_str = (
             f"最新:{known_ages[0]}h 最舊:{known_ages[-1]}h "
-            f"7日內:{sum(1 for a in known_ages if a <= PATROL_MAX_AGE_HOURS)}篇"
+            f"窗口({PATROL_MAX_AGE_HOURS}h)內:{sum(1 for a in known_ages if a <= PATROL_MAX_AGE_HOURS)}篇"
         )
     else:
         age_str = "無任何可判斷時間的貼文"
