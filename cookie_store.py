@@ -186,11 +186,16 @@ async def save_from(context) -> int:
 
 
 def _diff_names(prev: list[dict], now: list[dict]) -> list[str]:
-    """回傳值有變動的 cookie 名稱，只為了 log 好讀。"""
-    old = {c.get("name"): c.get("value") for c in prev}
+    """回傳有變動的 cookie 名稱。
+
+    要比 value 也要比 expires：Meta 續期 session 時常常只延長 sessionid 的到期日、
+    值不動（實測一次海巡把名目效期從 360 天推到 365 天）。只比 value 會把這種
+    「伺服器認可並續期」的訊號整個漏掉，rotate 次數就永遠是 0，看起來像沒作用。
+    """
+    old = {c.get("name"): (c.get("value"), c.get("expires")) for c in prev}
     return sorted(
         c["name"] for c in now
-        if c.get("name") in old and old[c["name"]] != c.get("value")
+        if c.get("name") in old and old[c["name"]] != (c.get("value"), c.get("expires"))
     )
 
 
@@ -220,6 +225,7 @@ def status() -> dict:
             f"來源 {jar.get('source')}｜{age_h:.1f} 小時前更新｜"
             f"已 rotate {jar.get('rotations', 0)} 次{exp_txt}"
         ),
+        "names": sorted(c.get("name", "") for c in jar["cookies"]),
         "alive_days": round(alive_d, 2),
         "rotations": jar.get("rotations", 0),
         "ds_user_id": uid,
