@@ -48,6 +48,18 @@ def init_db() -> None:
                 created_at  INTEGER NOT NULL,
                 PRIMARY KEY (kind, id)
             );
+            CREATE TABLE IF NOT EXISTS browser_tasks (
+                task_id     TEXT PRIMARY KEY,
+                payload     TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                result      TEXT,
+                worker      TEXT,
+                created_at  INTEGER NOT NULL,
+                claimed_at  INTEGER,
+                done_at     INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_browser_tasks_status
+                ON browser_tasks (status, created_at);
             CREATE TABLE IF NOT EXISTS kv (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -222,6 +234,89 @@ def set_kv(key: str, value) -> None:
             "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
             (key, json.dumps(value, ensure_ascii=False)),
         )
+
+
+# ─── 遠端瀏覽器任務佇列（本機 worker 用）──────────────────────
+#
+# 為什麼要有這個佇列：Threads 的 session cookie 誕生於使用者家裡的住宅 IP，
+# 拿到 Railway 的資料中心 IP 上用，等於每次登入都從地球另一端跳過來——這是
+# Meta 作廢 session 最強的訊號，比存取頻率更強。所以需要瀏覽器的動作（海巡
+# 搜尋、UI 回覆）改由本機筆電執行，Railway 只負責排程、去重、AI 判斷與推播。
+#
+# 方向刻意設計成「本機主動來領工」而不是「Railway 連進本機」：後者要打洞或
+# 常駐 Tailscale，前者只要一條 outbound HTTPS，家用網路防火牆不用動。
+
+
+def enqueue_browser_task(task_id: str, payload: dict) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO browser_tasks (task_id, payload, status, created_at) "
+            "VALUES (?, ?, 'pending', ?)",
+            (task_id, json.dumps(payload, ensure_ascii=False), int(time.time())),
+        )
+
+
+def claim_browser_task(worker: str) -> Optional[dict]:
+    """本機 worker 認領最舊的一筆待辦。沒有就回 None。
+
+    用 BEGIN IMMEDIATE 取得寫鎖再挑，避免兩個 worker（例如舊的沒關乾淨）
+    同時領到同一筆而重複跑一次海巡——重複海巡不只浪費，還會多打 Threads 一次。
+    """
+    with _conn() as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            "SELECT task_id, payload FROM browser_tasks "
+            "WHERE status = 'pending' ORDER BY created_at LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        c.execute(
+            "UPDATE browser_tasks SET status='claimed', claimed_at=?, worker=? WHERE task_id=?",
+            (int(time.time()), worker, row["task_id"]),
+        )
+        return {"task_id": row["task_id"], "payload": json.loads(row["payload"])}
+
+
+def complete_browser_task(task_id: str, result: dict, ok: bool = True) -> None:
+    with _conn() as c:
+        c.execute(
+            "UPDATE browser_tasks SET status=?, result=?, done_at=? WHERE task_id=?",
+            ("done" if ok else "failed", json.dumps(result, ensure_ascii=False),
+             int(time.time()), task_id),
+        )
+
+
+def get_browser_task(task_id: str) -> Optional[dict]:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT task_id, status, result, worker FROM browser_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "task_id": row["task_id"],
+        "status": row["status"],
+        "worker": row["worker"],
+        "result": json.loads(row["result"]) if row["result"] else None,
+    }
+
+
+def cleanup_browser_tasks(hours: int = 6) -> int:
+    """清掉舊任務。逾時未領的 pending 也一併清掉——海巡任務過期就沒價值，
+    留著只會在 worker 上線時一次湧出一堆過時的搜尋。"""
+    cutoff = int(time.time()) - hours * 3600
+    with _conn() as c:
+        cur = c.execute("DELETE FROM browser_tasks WHERE created_at < ?", (cutoff,))
+        return cur.rowcount
+
+
+def mark_worker_seen(worker: str) -> None:
+    set_kv("browser_worker_seen", {"worker": worker, "at": int(time.time())})
+
+
+def worker_last_seen() -> Optional[dict]:
+    return get_kv("browser_worker_seen", None)
 
 
 # ─── 主題歷史（避免重複）──────────────────────────────────────

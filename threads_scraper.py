@@ -11,18 +11,18 @@ import os
 import re
 import time
 import urllib.parse
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 # Ensure Playwright finds Chromium in the app directory (Railway build artifact)
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/app/.playwright-browsers")
 
 from playwright.async_api import async_playwright
 
+import cookie_store
+from models import ScrapedPost, shortcode_to_id as _shortcode_to_id
+
 logger = logging.getLogger(__name__)
 
-COOKIES_FILE = "threads_cookies.json"
 
 # 對齊真實 Chrome 的瀏覽器環境。舊版寫 Chrome/124（落後二十幾個版本）且未設
 # 語言與時區，等於自稱「兩年前的舊瀏覽器 + 英語系 UTC 使用者」——Threads 因此
@@ -33,14 +33,16 @@ _REAL_CHROME_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/150.0.0.0 Safari/537.36"
 )
+# 本機 worker 可以用有頭瀏覽器（SCRAPER_HEADLESS=0）。headless Chromium 在指紋上
+# 與真實瀏覽器有一票可偵測的差異，而本機反正有桌面，沒必要主動送出這個訊號。
+_HEADLESS = os.environ.get("SCRAPER_HEADLESS", "1") != "0"
+
 _CONTEXT_OPTS = {
     "user_agent": _REAL_CHROME_UA,
     "viewport": {"width": 1280, "height": 900},
     "locale": "zh-TW",
     "timezone_id": "Asia/Taipei",
 }
-# Threads/Instagram shortcode 字母表（與 Instagram 相同）
-_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
 # 從貼文連結往上遍歷 DOM，抓出貼文文字、帳號、media ID 與時間。
@@ -86,14 +88,6 @@ _POST_EXTRACT_JS = r"""el => {
 }"""
 
 
-def _shortcode_to_id(shortcode: str) -> str:
-    n = 0
-    for ch in shortcode:
-        if ch in _ALPHABET:
-            n = n * 64 + _ALPHABET.index(ch)
-    return str(n)
-
-
 def _build_search_url(encoded_keyword: str, search_mode: str) -> str:
     """組搜尋網址。
 
@@ -110,22 +104,6 @@ def _build_search_url(encoded_keyword: str, search_mode: str) -> str:
     if search_mode != "top":
         url += "&filter=recent"
     return url
-
-
-@dataclass
-class ScrapedPost:
-    shortcode: str
-    text: str
-    username: str
-    media_id: str = ""
-    age_hours: int = 9999  # 貼文年齡（小時），9999=無法判斷
-    like_count: int = 0    # 0 = 未知（API 未回傳）
-    age_source: str = "無"  # 時間來源：DOM / API / 文字 / 無（診斷用）
-    is_reply: bool = False  # 是否為別人貼文底下的留言（True 則海巡跳過）
-
-    @property
-    def id(self) -> str:
-        return self.media_id or _shortcode_to_id(self.shortcode)
 
 
 _TS_UNIT_HOURS = {"s": 1, "m": 1, "h": 1, "d": 24, "w": 168, "y": 8760}
@@ -406,46 +384,8 @@ async def _mark_replies(page, posts, max_age_hours: int = 200) -> int:
         return 0
 
 
-async def _load_cookies_from_env(context) -> int:
-    """把 THREADS_COOKIES（從真實瀏覽器匯出）載入 context，回傳載入筆數。
-
-    兩條路徑共用；先前各自複製一份。
-    """
-    cookies_env = os.environ.get("THREADS_COOKIES", "")
-    if not cookies_env:
-        return 0
-    try:
-        raw = json.loads(cookies_env)
-        pw_cookies = []
-        for c in raw:
-            pw = {
-                "name": c["name"],
-                "value": c["value"],
-                "domain": c.get("domain", ".threads.com"),
-                "path": c.get("path", "/"),
-            }
-            # Cookie-Editor 用 expirationDate，Playwright 用 expires
-            exp = c.get("expirationDate") or c.get("expires")
-            if exp and exp > 0:
-                pw["expires"] = int(exp)
-            if "httpOnly" in c:
-                pw["httpOnly"] = bool(c["httpOnly"])
-            if "secure" in c:
-                pw["secure"] = bool(c["secure"])
-            # 修正 sameSite 值（可能為 None）
-            ss = c.get("sameSite") or "Lax"
-            pw["sameSite"] = {"no_restriction": "None", "lax": "Lax", "strict": "Strict"}.get(ss.lower(), "Lax")
-            pw_cookies.append(pw)
-        await context.add_cookies(pw_cookies)
-        logger.info(f"[海巡] 已從環境變數載入 {len(pw_cookies)} 個 cookies")
-        return len(pw_cookies)
-    except Exception as e:
-        logger.warning(f"[海巡] THREADS_COOKIES 解析失敗: {e}")
-        return 0
-
-
 async def _ensure_logged_in(page, context) -> bool:
-    await _load_cookies_from_env(context)
+    await cookie_store.apply(context)
 
     # 前往首頁確認登入狀態
     await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=30000)
@@ -474,7 +414,7 @@ async def _ensure_logged_in(page, context) -> bool:
         if not await _is_logged_in(page, context):
             logger.error("[海巡] 帳密登入失敗（Instagram 多半會擋密碼登入），請更新 THREADS_COOKIES")
             return False
-        Path(COOKIES_FILE).write_text(json.dumps(await context.cookies()))
+        await cookie_store.save_from(context)
         logger.info("[海巡] 帳密登入成功")
         return True
     except Exception as e:
@@ -551,17 +491,12 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
     """search_mode: "recent"（最新）或 "top"（熱門/爆文）"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True,
+            headless=_HEADLESS,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
         context = await browser.new_context(**_CONTEXT_OPTS)
 
-        cookies_path = Path(COOKIES_FILE)
-        if cookies_path.exists():
-            try:
-                await context.add_cookies(json.loads(cookies_path.read_text()))
-            except Exception:
-                pass
+        await cookie_store.apply(context)
 
         page = await context.new_page()
         posts: list[ScrapedPost] = []
@@ -688,6 +623,9 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
             logger.error(f"海巡搜尋失敗: {e}")
             return []
         finally:
+            # 關閉前務必回寫：Meta 這次 session 換發的新 sessionid 只存在這個
+            # context 裡，沒存回去就等於下次繼續重放已被作廢的舊值。
+            await cookie_store.save_from(context)
             await browser.close()
 
 
@@ -695,7 +633,7 @@ async def get_profile_posts_async(username: str, limit: int = 50) -> list[Scrape
     """擷取指定帳號的公開貼文列表（需要登入 cookie）"""
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True,
+            headless=_HEADLESS,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
         context = await browser.new_context(**_CONTEXT_OPTS)
@@ -769,6 +707,9 @@ async def get_profile_posts_async(username: str, limit: int = 50) -> list[Scrape
             logger.error(f"[Profile] 擷取失敗: {e}")
             return []
         finally:
+            # 關閉前務必回寫：Meta 這次 session 換發的新 sessionid 只存在這個
+            # context 裡，沒存回去就等於下次繼續重放已被作廢的舊值。
+            await cookie_store.save_from(context)
             await browser.close()
 
 
@@ -914,12 +855,12 @@ async def search_and_reply_async(
     """
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True,
+            headless=_HEADLESS,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
         context = await browser.new_context(**_CONTEXT_OPTS)
 
-        await _load_cookies_from_env(context)
+        await cookie_store.apply(context)
 
         page = await context.new_page()
         replied = []
@@ -1052,6 +993,9 @@ async def search_and_reply_async(
         except Exception as e:
             logger.error(f"[海巡] search_and_reply 失敗: {e}")
         finally:
+            # 關閉前務必回寫：Meta 這次 session 換發的新 sessionid 只存在這個
+            # context 裡，沒存回去就等於下次繼續重放已被作廢的舊值。
+            await cookie_store.save_from(context)
             await browser.close()
 
         return {"posts": posts, "replied": replied, "failed": failed}

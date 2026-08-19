@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi import FastAPI, Request, HTTPException, Query, Header
 from fastapi.responses import JSONResponse, PlainTextResponse, HTMLResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -32,12 +32,33 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+# 瀏覽器動作在哪裡執行：
+#   local  —— Railway 容器內跑 Playwright（原行為）。cookie 在資料中心 IP 上被反覆
+#             使用，Meta 一兩天就作廢它，這是「cookie 老是停掉」的主因。
+#   remote —— 派給家裡筆電的 worker（住宅 IP，與 cookie 出身一致）。Railway 仍然
+#             負責排程、去重、AI 判斷與推播，只有「開瀏覽器」這件事搬走。
+BROWSER_WORKER_MODE = os.environ.get("BROWSER_WORKER_MODE", "local").lower()
+
 try:
-    from threads_scraper import search_threads_by_keyword_async, search_and_reply_async, get_profile_posts_async
+    from threads_scraper import search_threads_by_keyword_async, get_profile_posts_async
+    from threads_scraper import search_and_reply_async as _scraper_search_and_reply
     PLAYWRIGHT_AVAILABLE = True
 except Exception:
+    search_threads_by_keyword_async = get_profile_posts_async = _scraper_search_and_reply = None
     PLAYWRIGHT_AVAILABLE = False
-    logger.warning("Playwright 未安裝，海巡功能停用")
+    logger.warning("Playwright 未安裝（remote 模式下屬正常，瀏覽器在本機）")
+
+if BROWSER_WORKER_MODE == "remote":
+    import remote_browser
+    from remote_browser import search_and_reply_async
+    # 瀏覽器在本機，容器裡有沒有 Playwright 不影響海巡能不能跑
+    PLAYWRIGHT_AVAILABLE = True
+    logger.info("[海巡] remote 模式：瀏覽器動作派給本機 worker")
+else:
+    remote_browser = None
+    search_and_reply_async = _scraper_search_and_reply
+    if PLAYWRIGHT_AVAILABLE:
+        logger.info("[海巡] local 模式：Railway 容器內執行瀏覽器")
 
 scheduler = AsyncIOScheduler()
 
@@ -193,6 +214,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(token_health_job, CronTrigger(hour=9, minute=30, timezone="Asia/Taipei"), id="token_health", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_jobs(hours=24), CronTrigger(hour=4, minute=0, timezone="Asia/Taipei"), id="state_cleanup", replace_existing=True)
     scheduler.add_job(lambda: state.cleanup_old_processed_ids(days=90), CronTrigger(day_of_week="sun", hour=4, minute=30, timezone="Asia/Taipei"), id="processed_ids_cleanup", replace_existing=True)
+    scheduler.add_job(lambda: state.cleanup_browser_tasks(hours=6), CronTrigger(hour=4, minute=15, timezone="Asia/Taipei"), id="browser_tasks_cleanup", replace_existing=True)
     # 依 state 裡的 flag 決定海巡 / 留言輪詢是否啟動（跨部署記住）
     if state.get_kv("schedulers_enabled", False):
         scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=POLL_REPLIES_INTERVAL_MINUTES), id="poll_replies", replace_existing=True)
@@ -591,7 +613,11 @@ async def telegram_message_handler(request: Request):
     if text in ("ping", "狀態", "測試"):
         enabled = state.get_kv("schedulers_enabled", False)
         patrol_status = "▶️ 運行中" if enabled else "⏸ 已暫停"
-        send_telegram(f"✅ Bot 正常運作\n海巡狀態：{patrol_status}")
+        import cookie_store
+        lines = ["✅ Bot 正常運作", f"海巡狀態：{patrol_status}", f"🍪 {cookie_store.status()['text']}"]
+        if remote_browser:
+            lines.append(f"💻 {remote_browser.worker_status_text()}")
+        send_telegram("\n".join(lines))
         return JSONResponse({"ok": True})
 
     # ── 手動海巡（不列入配額）─────────────────────────
@@ -974,6 +1000,64 @@ async def test_login():
 @app.get("/admin/pending-jobs")
 async def list_pending_jobs():
     return {jid: {"status": j["status"], "draft_count": len(j.get("drafts", []))} for jid, j in state.list_pending_jobs().items()}
+
+
+# ─── 本機 worker 介面 ────────────────────────────────────────
+#
+# 本機筆電上的 local_worker.py 用這兩支端點領工與交件。方向固定為本機主動連出，
+# Railway 不會、也不需要連進家裡的網路。
+
+def _require_worker_token(token: str) -> None:
+    expected = os.environ.get("BROWSER_WORKER_TOKEN", "")
+    if not expected:
+        # 沒設密鑰就整個關閉這條路：預設安全，而不是預設開放。
+        raise HTTPException(status_code=503, detail="BROWSER_WORKER_TOKEN 未設定")
+    if token != expected:
+        raise HTTPException(status_code=401, detail="worker token 不符")
+
+
+@app.post("/worker/claim")
+async def worker_claim(request: Request, x_worker_token: str = Header(default="")):
+    """本機 worker 認領一筆待辦。沒有待辦就回 task: null（正常狀況，不是錯誤）。"""
+    _require_worker_token(x_worker_token)
+    body = await request.json() if await request.body() else {}
+    worker = (body.get("worker") or "unknown")[:64]
+    state.mark_worker_seen(worker)
+    task = state.claim_browser_task(worker)
+    if task:
+        logger.info(f"[派工] {task['task_id']} 已被 {worker} 認領")
+    return {"task": task}
+
+
+@app.post("/worker/result")
+async def worker_result(request: Request, x_worker_token: str = Header(default="")):
+    """本機 worker 交件。"""
+    _require_worker_token(x_worker_token)
+    body = await request.json()
+    task_id = body.get("task_id")
+    if not task_id:
+        raise HTTPException(status_code=400, detail="缺少 task_id")
+    worker = (body.get("worker") or "unknown")[:64]
+    state.mark_worker_seen(worker)
+    ok = bool(body.get("ok", True))
+    result = body.get("result") or {}
+    state.complete_browser_task(task_id, result, ok=ok)
+    n = len(result.get("posts", []))
+    logger.info(f"[派工] {task_id} 交件（ok={ok}，{n} 篇）")
+    return {"received": True}
+
+
+@app.get("/worker/status")
+async def worker_status():
+    """不需密鑰的健康檢視，方便從手機瀏覽器確認筆電有沒有在跑。"""
+    import cookie_store
+    seen = state.worker_last_seen()
+    return {
+        "mode": BROWSER_WORKER_MODE,
+        "worker_last_seen": seen,
+        "worker_online": remote_browser.worker_online() if remote_browser else None,
+        "cookie": cookie_store.status(),
+    }
 
 
 @app.get("/health")
