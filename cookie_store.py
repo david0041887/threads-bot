@@ -97,11 +97,15 @@ def _seed_cookies() -> list[dict]:
         return []
 
 
-def _write(cookies: list[dict], seed_fp: str, source: str, rotations: int = 0) -> None:
+def _write(cookies: list[dict], seed_fp: str, source: str,
+           rotations: int = 0, seed_at: int | None = None) -> None:
+    """seed_at＝這份 session 是什麼時候啟用的。跟 saved_at 不同：saved_at 每次
+    海巡都會刷新，看不出「這份 cookie 活了幾天」，而那正是我們要觀測的數字。"""
     state.set_kv(_KV_KEY, {
         "cookies": cookies,
         "seed_fp": seed_fp,
         "saved_at": int(time.time()),
+        "seed_at": seed_at or int(time.time()),
         "source": source,
         "rotations": rotations,
     })
@@ -173,7 +177,8 @@ async def save_from(context) -> int:
         if changed:
             rotations += 1
             logger.info(f"[cookie] 伺服器 rotate 了 {', '.join(changed)}，已回寫（累計 {rotations} 次）")
-        _write(_normalize(fresh), jar.get("seed_fp") or _fingerprint(fresh), "rotated", rotations)
+        _write(_normalize(fresh), jar.get("seed_fp") or _fingerprint(fresh), "rotated",
+               rotations, seed_at=jar.get("seed_at"))
         return len(fresh)
     except Exception as e:
         logger.warning(f"[cookie] 回寫失敗（不影響本次任務）: {e}")
@@ -206,10 +211,16 @@ def status() -> dict:
     if exp:
         days = (exp - time.time()) / 86400
         exp_txt = f"，sessionid 名目效期剩 {days:.0f} 天"
+    alive_d = (time.time() - jar.get("seed_at", jar.get("saved_at", 0))) / 86400
+    uid = next((c.get("value") for c in jar["cookies"] if c.get("name") == "ds_user_id"), "?")
     return {
         "ok": True,
         "text": (
-            f"cookie {len(jar['cookies'])} 個｜來源 {jar.get('source')}｜"
-            f"{age_h:.1f} 小時前更新｜已 rotate {jar.get('rotations', 0)} 次{exp_txt}"
+            f"cookie {len(jar['cookies'])} 個｜帳號 {uid}｜這份 session 已存活 {alive_d:.1f} 天｜"
+            f"來源 {jar.get('source')}｜{age_h:.1f} 小時前更新｜"
+            f"已 rotate {jar.get('rotations', 0)} 次{exp_txt}"
         ),
+        "alive_days": round(alive_d, 2),
+        "rotations": jar.get("rotations", 0),
+        "ds_user_id": uid,
     }
