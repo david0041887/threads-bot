@@ -347,7 +347,8 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
         if search_result.get("error") == "not_logged_in":
             msg = (
                 "❌ 海巡無法運作：Threads 登入已失效\n"
-                "THREADS_COOKIES 的 sessionid 過期了，需要從瀏覽器重新匯出 cookie "
+                "sessionid 被 Meta 作廢或已過期（多半是作廢——名目效期通常還很長，"
+                "查 /worker/status 可以看剩幾天）。需要從瀏覽器重新匯出 cookie "
                 "並更新 Railway 環境變數。\n"
                 "在此之前海巡不會有任何推播。"
             )
