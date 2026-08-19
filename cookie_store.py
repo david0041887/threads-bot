@@ -193,7 +193,12 @@ def status() -> dict:
     """給 Telegram /status 用的健康摘要。"""
     jar = state.get_kv(_KV_KEY, None)
     if not jar or not jar.get("cookies"):
-        return {"ok": False, "text": "無 cookie 存檔（THREADS_COOKIES 未設定？）"}
+        # 存檔要等第一次跑瀏覽器才寫入。這時候如果報「未設定」會害人跑去
+        # Railway 檢查一個其實填好的環境變數，所以兩種空狀態要分清楚。
+        seed = _seed_cookies()
+        if seed:
+            return {"ok": True, "text": f"種子已就緒（{len(seed)} 個），尚未初始化 —— 第一次海巡後才會有存檔"}
+        return {"ok": False, "text": "無 cookie：THREADS_COOKIES 未設定，且 Volume 內無存檔"}
     age_h = (time.time() - jar.get("saved_at", 0)) / 3600
     sid = next((c for c in jar["cookies"] if c.get("name") == "sessionid"), None)
     exp = sid.get("expires") if sid else None
