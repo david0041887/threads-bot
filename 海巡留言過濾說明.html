@@ -1,0 +1,183 @@
+<meta charset="utf-8">
+<title>海巡留言過濾機制說明</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  body {
+    font-family: "Microsoft JhengHei", "微軟正黑體", sans-serif;
+    font-size: 10.5pt; line-height: 1.75; color: #1a1a1a; margin: 0;
+  }
+  h1 { font-size: 19pt; margin: 0 0 4px; letter-spacing: .5px; }
+  .sub { color: #666; font-size: 9.5pt; margin-bottom: 22px;
+         border-bottom: 2px solid #1a1a1a; padding-bottom: 10px; }
+  h2 { font-size: 13pt; margin: 26px 0 10px; padding-left: 9px;
+       border-left: 4px solid #2b6cb0; page-break-after: avoid; }
+  h3 { font-size: 11pt; margin: 16px 0 6px; color: #2b3a4a; page-break-after: avoid; }
+  p { margin: 8px 0; }
+  code { font-family: Consolas, "Courier New", monospace; font-size: 9.5pt;
+         background: #f0f2f5; padding: 1px 4px; border-radius: 3px;
+         word-break: break-word; }
+  pre { background: #f7f8fa; border: 1px solid #dde1e6; border-left: 3px solid #2b6cb0;
+        padding: 10px 12px; font-family: Consolas, monospace; font-size: 8.8pt;
+        line-height: 1.55; overflow-x: auto; page-break-inside: avoid; margin: 10px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 9.5pt;
+          page-break-inside: avoid; }
+  th { background: #2b3a4a; color: #fff; text-align: left; padding: 7px 9px; font-weight: 600; }
+  td { border-bottom: 1px solid #e2e5e9; padding: 7px 9px; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .box { background: #fff8e6; border: 1px solid #f0d48a; border-radius: 4px;
+         padding: 10px 13px; margin: 12px 0; page-break-inside: avoid; }
+  .box.bad { background: #fdf0ef; border-color: #eab9b4; }
+  .box.good { background: #eef7f0; border-color: #b7d8bf; }
+  .box > b:first-child { display: block; margin-bottom: 3px; }
+  .flow { margin: 14px 0; }
+  .step { display: flex; align-items: flex-start; margin-bottom: 7px;
+          page-break-inside: avoid; }
+  .num { flex: 0 0 22px; height: 22px; line-height: 22px; text-align: center;
+         background: #2b6cb0; color: #fff; border-radius: 50%; font-size: 9pt;
+         font-weight: 600; margin-right: 10px; }
+  .step-body { flex: 1; padding-top: 1px; }
+  .step-body .t { font-weight: 600; }
+  .step-body .d { color: #555; font-size: 9.5pt; }
+  .ref { color: #777; font-size: 8.8pt; font-family: Consolas, monospace; }
+  .foot { margin-top: 28px; padding-top: 10px; border-top: 1px solid #ccc;
+          color: #777; font-size: 8.8pt; }
+</style>
+
+<h1>海巡留言過濾機制</h1>
+<div class="sub">Threads AI Bot（保險視界 insurance_vision_）｜只推原創貼文，跳過別人貼文底下的留言｜2026-08-22</div>
+
+<h2>1. 要解決的問題</h2>
+
+<p>Threads 的關鍵字搜尋結果裡混著兩種東西：<b>原創貼文</b>與<b>別人貼文底下的留言</b>。實測某一批 8 篇結果中有 5 篇是留言。</p>
+
+<p>對海巡的目的來說，留言幾乎沒有價值：</p>
+<ul>
+  <li>留言的作者多半不是在<b>提出</b>需求，而是在回應別人的討論</li>
+  <li>在留言串裡再插一句話，能見度極低</li>
+  <li>同業承接客戶的動作大量發生在留言區，推播過來全是雜訊</li>
+</ul>
+
+<h2>2. 為什麼不能只看搜尋結果的畫面</h2>
+
+<div class="box bad">
+  <b>實測結論：搜尋卡片的 DOM 分不出留言與原創。</b>
+  兩者在搜尋頁上長得一模一樣 —— 同樣的頭像、帳號、內文、時間戳，沒有任何欄位或 class 可以區分。想靠畫面判斷這條路是走不通的。
+</div>
+
+<p>能區分的資訊在<b>貼文自己的頁面</b>上：那個頁面的 HTML 裡帶有 <code>"is_reply": true / false</code> 欄位。</p>
+
+<div class="box">
+  <b>關鍵限制：這個欄位只有「瀏覽器 session」拿得到。</b>
+  <b>用 httpx 帶著同一份 cookie 去抓同一個網址，回應裡就是不會有這個欄位。</b>只有在已登入的 Playwright 瀏覽器 context 內用 <code>fetch(url, {credentials:'include'})</code> 去要，Threads 才會把這個欄位吐出來。
+  <br><br>
+  這也是為什麼這段判斷必須寫在瀏覽器裡跑，不能拉到 Python 層用 HTTP client 處理。
+</div>
+
+<h2>3. 實際怎麼做</h2>
+
+<p class="ref">threads_scraper.py:369 <code>_mark_replies()</code>　·　呼叫點 threads_scraper.py:991</p>
+
+<div class="flow">
+  <div class="step"><div class="num">1</div><div class="step-body">
+    <span class="t">挑出要查的貼文</span>
+    <div class="d">只查 <code>age_hours &lt;= 200</code> 的貼文。更舊的反正會被後面的時間窗口擋掉，查了是浪費流量。</div>
+  </div></div>
+  <div class="step"><div class="num">2</div><div class="step-body">
+    <span class="t">在已登入的瀏覽器頁面內平行抓取</span>
+    <div class="d">用 <code>page.evaluate()</code> 注入一段 JS，對每篇貼文的網址發 <code>fetch</code>，最多 6 條並行。</div>
+  </div></div>
+  <div class="step"><div class="num">3</div><div class="step-body">
+    <span class="t">用正規式取出 is_reply</span>
+    <div class="d"><code>/"is_reply"\s*:\s*(true|false)/</code> —— 不解析整份 HTML，直接抓那個欄位。</div>
+  </div></div>
+  <div class="step"><div class="num">4</div><div class="step-body">
+    <span class="t">標記回 ScrapedPost</span>
+    <div class="d">只有明確回傳 <code>true</code> 的才設 <code>p.is_reply = True</code>，並回傳被標記的篇數供診斷用。</div>
+  </div></div>
+</div>
+
+<pre>const url = it.u
+    ? `https://www.threads.com/@${it.u}/post/${it.sc}`
+    : `https://www.threads.com/t/${it.sc}`;
+const r = await fetch(url, {credentials:'include'});   // 必須帶 session
+const t = await r.text();
+const m = t.match(/"is_reply"\s*:\s*(true|false)/);
+out[it.sc] = m ? (m[1] === 'true') : null;             // 抓不到就是 null</pre>
+
+<h3>三個刻意的保守設計</h3>
+
+<table>
+  <tr><th style="width:31%">情況</th><th style="width:20%">處理</th><th>理由</th></tr>
+  <tr>
+    <td>單篇抓不到 <code>is_reply</code>（回 <code>null</code>）</td>
+    <td>視為<b>非留言</b>，照常推播</td>
+    <td>寧可漏放一則留言，也不要誤殺一篇真正的原創貼文 —— 原創貼文才是海巡唯一的產出</td>
+  </tr>
+  <tr>
+    <td>整段 <code>_mark_replies</code> 拋錯</td>
+    <td>吞掉例外，全部視為非留言</td>
+    <td>這是<b>加分項而非必要條件</b>。它壞掉不該讓整次海巡失敗，頂多推播品質下降</td>
+  </tr>
+  <tr>
+    <td>貼文超過 200 小時</td>
+    <td>不查</td>
+    <td>後面的時間窗口（預設 6 小時）本來就會擋掉，查了純屬浪費</td>
+  </tr>
+</table>
+
+<div class="box good">
+  <b>設計原則：fail-open 用在這裡，fail-closed 用在相關性判斷。</b>
+  留言判斷失敗時放行（fail-open），因為誤殺原創的代價高於漏放留言。但 <code>is_patrol_worthy</code> 的相關性判斷相反 —— 不確定就擋（fail-closed），因為推錯東西的代價高於少推一則。兩者方向不同是刻意的。
+</div>
+
+<h2>4. 過濾發生在哪一步</h2>
+
+<p class="ref">main.py:404 起　·　Phase 2 過濾迴圈</p>
+
+<p>抓回來的貼文先<b>依時間由新到舊排序</b>，再逐一跑過濾條件。順序是有意義的 —— 便宜的檢查排前面，最貴的 AI 判斷排最後：</p>
+
+<table>
+  <tr><th style="width:8%">順序</th><th style="width:30%">條件</th><th style="width:20%">成本</th><th>不通過的處理</th></tr>
+  <tr><td>1</td><td>已看過（去重）</td><td>本地 DB 查詢</td><td>直接跳過</td></tr>
+  <tr><td>2</td><td>內文少於 20 字</td><td>字串長度</td><td>直接跳過</td></tr>
+  <tr><td><b>3</b></td><td><b>is_reply 為真</b></td><td><b>已在抓取時算好</b></td><td><b>跳過，並記為已處理</b></td></tr>
+  <tr><td>4</td><td>時間無法判斷（9999）</td><td>欄位比較</td><td>跳過（不記為已處理）</td></tr>
+  <tr><td>5</td><td>超過時間窗口（6 小時）</td><td>欄位比較</td><td>跳過（不記為已處理）</td></tr>
+  <tr><td>6</td><td><code>is_patrol_worthy</code> 相關性</td><td>呼叫 LLM</td><td>跳過，並記為已處理</td></tr>
+</table>
+
+<div class="box">
+  <b>為什麼留言要「記為已處理」，時間不符卻不記？</b><br>
+  留言這個屬性<b>永遠不會變</b>，記下來以後就不必再判斷一次。但「太舊」「時間不明」是<b>當下狀態</b> —— 同一篇貼文在下一輪可能因為抓到更準的時間而通過，所以不能封死。
+  <br><br>
+  同理，相關性判斷要記，因為那要花一次 LLM 呼叫，同一篇不值得問第二次。
+</div>
+
+<h2>5. 怎麼確認它有在運作</h2>
+
+<p>每次海巡的 log 與 Telegram 診斷訊息都會帶上留言篇數：</p>
+
+<pre>[海巡] 找到 13 篇貼文（時間可判斷:11/13，最新:0h 最舊:33h，7日內:11 篇，其中留言:5 篇）
+[海巡] 關鍵字「保費」無新貼文（舊:3 時間不明:2 留言:5 不相關:3，共:13）</pre>
+
+<div class="box bad">
+  <b>解讀時要注意：「留言:N」只算「這一輪新出現」的留言。</b>
+  去重（第 1 步）排在 is_reply 統計之前，所以上一輪已經看過並記錄的留言不會再被計入。數字偏小是正常的，不代表過濾失效。
+</div>
+
+<h3>手動驗證</h3>
+<pre>GET /admin/test-search?keyword=保費&amp;mode=recent</pre>
+<p>回傳每篇的 <code>age_hours</code> 與完整 log。注意這支端點<b>不做</b>去重與 is_reply 過濾，是給人看原始抓取結果用的 —— 拿它跟實際推播的內容對照，就能看出過濾擋掉了哪些。</p>
+
+<h2>6. 已知限制</h2>
+
+<ul>
+  <li><b>每篇要多發一次 HTTP 請求。</b>13 篇貼文就是 13 次額外 fetch。並行數壓在 6 是為了平衡速度與「看起來像不像真人」—— 真人不會一秒之內開六個貼文頁，這個數字未來若要調，只會往下調。</li>
+  <li><b>依賴 Threads 頁面裡的 <code>is_reply</code> 欄位名稱。</b>Meta 改欄位名的話會靜默失效：正規式抓不到就回 <code>null</code>，全部視為非留言 —— 不會報錯，只會發現留言又混進推播裡。這是要留意的靜默失效點。</li>
+  <li><b>必須在登入狀態下才有效。</b>未登入時貼文頁不帶這個欄位，等於整個機制停擺（而且同樣是靜默的）。</li>
+</ul>
+
+<div class="foot">
+  程式碼位置：<code>threads_scraper.py:369 _mark_replies()</code>　·　<code>main.py:404 Phase 2 過濾迴圈</code><br>
+  相關設定：<code>PATROL_MAX_AGE_HOURS = 6</code>（推播時間窗口）　·　<code>_mark_replies(max_age_hours=200)</code>（查詢範圍）
+</div>
