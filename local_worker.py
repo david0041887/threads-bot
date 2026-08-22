@@ -87,6 +87,9 @@ POLL_INTERVAL_S = int(os.environ.get("WORKER_POLL_SECONDS", "30"))
 # 連不上 Railway 時的退避上限。網路斷了就每 5 分鐘試一次，不要洗版 log
 _BACKOFF_MAX_S = 300
 
+# --login 模式最多等多久讓使用者完成登入
+LOGIN_WAIT_S = int(os.environ.get("LOGIN_WAIT_SECONDS", "420"))
+
 
 async def _claim(client: httpx.AsyncClient) -> dict | None:
     r = await client.post(
@@ -167,7 +170,7 @@ async def login_mode() -> None:
     print("=" * 64)
     print("  接下來會開啟一個瀏覽器視窗（worker 專用，不是你平常那個 Chrome）")
     print("  請在裡面登入 Threads 的 insurance_vision_ 帳號")
-    print("  登入完成後回到這個視窗，按 Enter")
+    print("  登入完成後不用做任何事——偵測到就會自動存檔並關閉視窗")
     print("=" * 64)
     print()
     async with async_playwright() as p:
@@ -175,9 +178,32 @@ async def login_mode() -> None:
         try:
             page = await context.new_page()
             await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=60000)
-            await asyncio.to_thread(input, "登入好了就按 Enter → ")
-            ok = await ts._is_logged_in(page, context)
+            # 輪詢偵測而不是等 Enter：這支程式常常是被別人（例如 Claude Code）
+            # 在背景啟動的，那種情況下 stdin 直接是 EOF，input() 會立刻返回而
+            # 誤判成「使用者說登入好了」。看畫面比看鍵盤可靠。
+            ok = False
+            deadline = time.time() + LOGIN_WAIT_S
+            while time.time() < deadline:
+                try:
+                    if await ts._is_logged_in(page, context):
+                        ok = True
+                        break
+                except Exception:
+                    pass  # 使用者正在頁面間跳轉，下一輪再看
+                remain = int(deadline - time.time())
+                if remain % 30 == 0:
+                    logger.info(f"等待登入中…（剩 {remain // 60} 分 {remain % 60} 秒）")
+                await asyncio.sleep(3)
             if ok:
+                # 先驗帳號再存檔：存下錯帳號的 session 之後，海巡會照常運作、
+                # 照常推播，只是全部記在錯的帳號上，很難察覺。
+                mismatch = cookie_store.account_mismatch(await context.cookies())
+                if mismatch:
+                    print()
+                    print(f"❌ {mismatch}")
+                    print("   這不是 insurance_vision_。請在瀏覽器裡登出、改用正確帳號，")
+                    print("   然後重跑 login_threads.bat（本次不會存檔）")
+                    return
                 n = await cookie_store.save_from(context)
                 print()
                 print(f"✅ 登入成功，{n} 個 cookie 已存進 profile 與存檔")
@@ -185,8 +211,8 @@ async def login_mode() -> None:
                 print("   接下來雙擊 start_worker.bat 就會開始領工")
             else:
                 print()
-                print("❌ 看起來還沒登入（頁面上仍有登入連結、找不到發文入口）")
-                print("   再跑一次 python local_worker.py --login")
+                print("❌ 逾時：仍未偵測到登入（頁面上還有登入連結、找不到發文入口）")
+                print("   再跑一次 login_threads.bat")
         finally:
             await closable.close()
 
@@ -201,6 +227,9 @@ async def main() -> None:
     logger.info(f"state: {os.environ['STATE_DB_PATH']}")
     logger.info(f"cookie: {cookie_store.status()['text']}")
     logger.info(f"profile: {os.environ.get('BROWSER_USER_DATA_DIR') or '（無，用臨時 context）'}")
+    mismatch = cookie_store.account_mismatch()
+    if mismatch:
+        logger.warning(f"⚠ {mismatch} —— 海巡會用錯帳號執行，請重跑 login_threads.bat")
     await _pick_channel()
     logger.info(f"瀏覽器：{'有頭' if os.environ.get('SCRAPER_HEADLESS') == '0' else 'headless'}｜每 {POLL_INTERVAL_S} 秒領工一次")
 

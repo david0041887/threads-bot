@@ -213,6 +213,34 @@ def _diff_names(prev: list[dict], now: list[dict]) -> list[str]:
     )
 
 
+def expected_user_id() -> str:
+    return os.environ.get("EXPECTED_DS_USER_ID", "").strip()
+
+
+def current_user_id(cookies: list[dict] | None = None) -> str:
+    """目前這份 cookie 屬於哪個帳號（ds_user_id）。"""
+    if cookies is None:
+        jar = state.get_kv(_KV_KEY, None) or {}
+        cookies = jar.get("cookies") or []
+    return next((c.get("value", "") for c in cookies if c.get("name") == "ds_user_id"), "")
+
+
+def account_mismatch(cookies: list[dict] | None = None) -> str:
+    """登入到錯帳號時回傳說明字串，正確或未設定預期值時回空字串。
+
+    這個檢查存在的理由：使用者平常用的是另一個個人帳號，瀏覽器會自動帶入，
+    已經匯錯／登錯兩次。錯帳號的失敗方式很惡劣——一切看起來都正常運作，
+    海巡照跑照推播，只是行為全記在錯的帳號上，而且要很久才會發現。
+    """
+    want = expected_user_id()
+    if not want:
+        return ""
+    got = current_user_id(cookies)
+    if got and got != want:
+        return f"登入的是帳號 {got}，但預期是 {want}"
+    return ""
+
+
 def status() -> dict:
     """給 Telegram /status 用的健康摘要。"""
     jar = state.get_kv(_KV_KEY, None)
