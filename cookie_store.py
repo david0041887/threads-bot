@@ -140,7 +140,21 @@ def load() -> list[dict]:
 
 
 async def apply(context) -> int:
-    """把目前該用的 cookie 灌進 Playwright context，回傳筆數。"""
+    """把目前該用的 cookie 灌進 Playwright context，回傳筆數。
+
+    persistent profile（BROWSER_USER_DATA_DIR）自己就帶著上次的登入狀態，而且
+    多半比我們的存檔新。這種情況灌種子只會把「還活著的 session」換成「已經死的
+    那份」，而且失敗方式是靜默的——看起來一切正常，就是登不進去。所以只在
+    context 裡沒有可用 session 時才灌。
+    """
+    try:
+        existing = await context.cookies()
+        if any(c.get("name") == "sessionid" and c.get("value") for c in existing):
+            logger.info("[cookie] context 已自帶 session（persistent profile），不覆蓋")
+            return 0
+    except Exception:
+        pass
+
     cookies = load()
     if not cookies:
         return 0

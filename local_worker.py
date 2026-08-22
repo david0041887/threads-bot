@@ -50,8 +50,14 @@ _load_env_file(_HERE / ".env.worker")
 
 # 本機的 state.db 預設放在專案旁邊；不設會沿用 Railway 的 /app/data 路徑而失敗
 os.environ.setdefault("STATE_DB_PATH", str(_HERE / "worker_data" / "state.db"))
-# 本機有桌面，預設用有頭瀏覽器（指紋更像真人；要背景跑就設 SCRAPER_HEADLESS=1）
-os.environ.setdefault("SCRAPER_HEADLESS", "0")
+# worker 專用的 Chrome profile：cookie / localStorage 由瀏覽器自己維護，
+# 登入一次就長期有效，不必再匯出貼上。注意是專用目錄，不是你平常在用的 profile
+# （Chrome 開著會鎖住它，Playwright 開不起來）。
+os.environ.setdefault("BROWSER_USER_DATA_DIR", str(_HERE / "worker_data" / "chrome-profile"))
+# 用真實 Chrome 而不是 Chromium；找不到會在啟動時自動退回（見 _pick_channel）
+os.environ.setdefault("BROWSER_CHANNEL", "chrome")
+# 平常背景跑，不要每小時彈一個視窗打斷工作；--login 模式會強制有頭
+os.environ.setdefault("SCRAPER_HEADLESS", "1")
 
 import httpx  # noqa: E402
 import state  # noqa: E402
@@ -124,6 +130,67 @@ async def _run_task(payload: dict) -> dict:
     }
 
 
+async def _pick_channel() -> None:
+    """確認真實 Chrome 能不能用，不能就退回 Chromium。
+
+    不做這個檢查的話，每一筆任務都會失敗，而錯誤訊息（"Chromium distribution
+    'chrome' is not found"）指向的方向很難懂——會被當成 Playwright 壞了。
+    """
+    import threads_scraper as ts
+    if not ts._BROWSER_CHANNEL:
+        logger.info("瀏覽器：Chromium")
+        return
+    from playwright.async_api import async_playwright
+    try:
+        async with async_playwright() as p:
+            b = await p.chromium.launch(headless=True, channel=ts._BROWSER_CHANNEL, args=ts._LAUNCH_ARGS)
+            await b.close()
+        logger.info(f"瀏覽器：真實 {ts._BROWSER_CHANNEL}")
+    except Exception as e:
+        logger.warning(f"找不到 {ts._BROWSER_CHANNEL}（{type(e).__name__}），改用 Chromium")
+        ts._BROWSER_CHANNEL = ""
+
+
+async def login_mode() -> None:
+    """一次性登入：開有頭瀏覽器讓使用者自己登入，登入狀態留在專用 profile 裡。
+
+    這是為了取代「用 Cookie-Editor 匯出 JSON 再貼進環境變數」那套流程——
+    那套每次 session 被作廢都要重來一次，而且貼錯格式的失敗方式很隱晦。
+    """
+    import threads_scraper as ts
+    ts._HEADLESS = False  # 登入一定要看得到畫面
+    await _pick_channel()
+
+    from playwright.async_api import async_playwright
+    state.init_db()
+    print()
+    print("=" * 64)
+    print("  接下來會開啟一個瀏覽器視窗（worker 專用，不是你平常那個 Chrome）")
+    print("  請在裡面登入 Threads 的 insurance_vision_ 帳號")
+    print("  登入完成後回到這個視窗，按 Enter")
+    print("=" * 64)
+    print()
+    async with async_playwright() as p:
+        context, closable = await ts._open_context(p)
+        try:
+            page = await context.new_page()
+            await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=60000)
+            await asyncio.to_thread(input, "登入好了就按 Enter → ")
+            ok = await ts._is_logged_in(page, context)
+            if ok:
+                n = await cookie_store.save_from(context)
+                print()
+                print(f"✅ 登入成功，{n} 個 cookie 已存進 profile 與存檔")
+                print(f"   profile：{os.environ['BROWSER_USER_DATA_DIR']}")
+                print("   接下來雙擊 start_worker.bat 就會開始領工")
+            else:
+                print()
+                print("❌ 看起來還沒登入（頁面上仍有登入連結、找不到發文入口）")
+                print("   再跑一次 python local_worker.py --login")
+        finally:
+            await closable.close()
+
+
 async def main() -> None:
     if not BOT_URL or not TOKEN:
         logger.error("BOT_URL 或 BROWSER_WORKER_TOKEN 未設定（檢查 .env.worker）")
@@ -133,6 +200,8 @@ async def main() -> None:
     logger.info(f"worker「{WORKER_NAME}」啟動 → {BOT_URL}")
     logger.info(f"state: {os.environ['STATE_DB_PATH']}")
     logger.info(f"cookie: {cookie_store.status()['text']}")
+    logger.info(f"profile: {os.environ.get('BROWSER_USER_DATA_DIR') or '（無，用臨時 context）'}")
+    await _pick_channel()
     logger.info(f"瀏覽器：{'有頭' if os.environ.get('SCRAPER_HEADLESS') == '0' else 'headless'}｜每 {POLL_INTERVAL_S} 秒領工一次")
 
     backoff = 0
@@ -167,6 +236,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(login_mode() if "--login" in sys.argv else main())
     except KeyboardInterrupt:
         logger.info("已停止")

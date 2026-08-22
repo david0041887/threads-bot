@@ -33,6 +33,40 @@ _REAL_CHROME_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/150.0.0.0 Safari/537.36"
 )
+# 專用 Chrome profile 目錄。設了就用 launch_persistent_context：cookie、localStorage
+# 與 IndexedDB 全部交給瀏覽器自己維護，rotate 天然正確，也不必再手動匯出貼上。
+# 注意這必須是「worker 專用」的目錄，不能指向使用者平常在用的 Chrome profile
+# —— Chrome 執行中會鎖住 profile，Playwright 開不起來。
+_USER_DATA_DIR = os.environ.get("BROWSER_USER_DATA_DIR", "").strip()
+# 設 "chrome" 可用真實 Chrome 而不是 Chromium（指紋更接近真人；Railway 容器內沒有，留空）
+_BROWSER_CHANNEL = os.environ.get("BROWSER_CHANNEL", "").strip()
+_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+
+
+async def _open_context(p):
+    """開一個瀏覽器 context，回傳 (context, closable)。
+
+    抽成單一入口的理由：這個檔案有三個進入點，過去 cookie 載入與登入檢查都各自
+    複製一份，改了一份另一份沒跟上。啟動方式現在有兩種，更不能再分頭寫。
+    """
+    if _USER_DATA_DIR:
+        ctx = await p.chromium.launch_persistent_context(
+            _USER_DATA_DIR,
+            headless=_HEADLESS,
+            args=_LAUNCH_ARGS,
+            **({"channel": _BROWSER_CHANNEL} if _BROWSER_CHANNEL else {}),
+            **_CONTEXT_OPTS,
+        )
+        # persistent context 自己就是「瀏覽器」，關它等於關瀏覽器
+        return ctx, ctx
+    browser = await p.chromium.launch(
+        headless=_HEADLESS,
+        args=_LAUNCH_ARGS,
+        **({"channel": _BROWSER_CHANNEL} if _BROWSER_CHANNEL else {}),
+    )
+    return await browser.new_context(**_CONTEXT_OPTS), browser
+
+
 # 本機 worker 可以用有頭瀏覽器（SCRAPER_HEADLESS=0）。headless Chromium 在指紋上
 # 與真實瀏覽器有一票可偵測的差異，而本機反正有桌面，沒必要主動送出這個訊號。
 _HEADLESS = os.environ.get("SCRAPER_HEADLESS", "1") != "0"
@@ -490,11 +524,7 @@ def _extract_like_map(json_text: str) -> dict[str, int]:
 async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_mode: str = "recent") -> list[ScrapedPost]:
     """search_mode: "recent"（最新）或 "top"（熱門/爆文）"""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=_HEADLESS,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        )
-        context = await browser.new_context(**_CONTEXT_OPTS)
+        context, _closable = await _open_context(p)
 
         await cookie_store.apply(context)
 
@@ -626,17 +656,13 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
             # 關閉前務必回寫：Meta 這次 session 換發的新 sessionid 只存在這個
             # context 裡，沒存回去就等於下次繼續重放已被作廢的舊值。
             await cookie_store.save_from(context)
-            await browser.close()
+            await _closable.close()
 
 
 async def get_profile_posts_async(username: str, limit: int = 50) -> list[ScrapedPost]:
     """擷取指定帳號的公開貼文列表（需要登入 cookie）"""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=_HEADLESS,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        )
-        context = await browser.new_context(**_CONTEXT_OPTS)
+        context, _closable = await _open_context(p)
         page = await context.new_page()
 
         try:
@@ -710,7 +736,7 @@ async def get_profile_posts_async(username: str, limit: int = 50) -> list[Scrape
             # 關閉前務必回寫：Meta 這次 session 換發的新 sessionid 只存在這個
             # context 裡，沒存回去就等於下次繼續重放已被作廢的舊值。
             await cookie_store.save_from(context)
-            await browser.close()
+            await _closable.close()
 
 
 async def _dump_page_elements(page) -> str:
@@ -854,11 +880,7 @@ async def search_and_reply_async(
     回傳 {"posts": [...], "replied": [shortcode, ...], "failed": [shortcode, ...]}
     """
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=_HEADLESS,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        )
-        context = await browser.new_context(**_CONTEXT_OPTS)
+        context, _closable = await _open_context(p)
 
         await cookie_store.apply(context)
 
@@ -996,6 +1018,6 @@ async def search_and_reply_async(
             # 關閉前務必回寫：Meta 這次 session 換發的新 sessionid 只存在這個
             # context 裡，沒存回去就等於下次繼續重放已被作廢的舊值。
             await cookie_store.save_from(context)
-            await browser.close()
+            await _closable.close()
 
         return {"posts": posts, "replied": replied, "failed": failed}
