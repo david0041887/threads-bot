@@ -182,12 +182,26 @@ async def login_mode() -> None:
             # 在背景啟動的，那種情況下 stdin 直接是 EOF，input() 會立刻返回而
             # 誤判成「使用者說登入好了」。看畫面比看鍵盤可靠。
             ok = False
+            warned_account = ""
             deadline = time.time() + LOGIN_WAIT_S
             while time.time() < deadline:
                 try:
                     if await ts._is_logged_in(page, context):
-                        ok = True
-                        break
+                        mismatch = cookie_store.account_mismatch(await context.cookies())
+                        if not mismatch:
+                            ok = True
+                            break
+                        # 錯帳號不要關視窗——關掉他就得從頭再來一次。留在原地
+                        # 提示切換帳號，切對了下一輪自動偵測到。
+                        got = cookie_store.current_user_id(await context.cookies())
+                        if got != warned_account:
+                            warned_account = got
+                            print()
+                            print(f"⚠ 目前登入的是帳號 {got}，不是 insurance_vision_（{cookie_store.expected_user_id()}）")
+                            print("  請在這個瀏覽器視窗裡切換帳號（左下角頭像 → 切換帳號），")
+                            print("  或登出後用 insurance_vision_ 的 Instagram 帳密登入。")
+                            print("  切好之後不用回來按任何鍵，這裡會自動偵測。")
+                            print()
                 except Exception:
                     pass  # 使用者正在頁面間跳轉，下一輪再看
                 remain = int(deadline - time.time())
@@ -195,15 +209,6 @@ async def login_mode() -> None:
                     logger.info(f"等待登入中…（剩 {remain // 60} 分 {remain % 60} 秒）")
                 await asyncio.sleep(3)
             if ok:
-                # 先驗帳號再存檔：存下錯帳號的 session 之後，海巡會照常運作、
-                # 照常推播，只是全部記在錯的帳號上，很難察覺。
-                mismatch = cookie_store.account_mismatch(await context.cookies())
-                if mismatch:
-                    print()
-                    print(f"❌ {mismatch}")
-                    print("   這不是 insurance_vision_。請在瀏覽器裡登出、改用正確帳號，")
-                    print("   然後重跑 login_threads.bat（本次不會存檔）")
-                    return
                 n = await cookie_store.save_from(context)
                 print()
                 print(f"✅ 登入成功，{n} 個 cookie 已存進 profile 與存檔")
@@ -211,7 +216,10 @@ async def login_mode() -> None:
                 print("   接下來雙擊 start_worker.bat 就會開始領工")
             else:
                 print()
-                print("❌ 逾時：仍未偵測到登入（頁面上還有登入連結、找不到發文入口）")
+                if warned_account:
+                    print(f"❌ 逾時：整段時間都停在帳號 {warned_account}，沒有切到 {cookie_store.expected_user_id()}")
+                else:
+                    print("❌ 逾時：仍未偵測到登入（頁面上還有登入連結、找不到發文入口）")
                 print("   再跑一次 login_threads.bat")
         finally:
             await closable.close()
