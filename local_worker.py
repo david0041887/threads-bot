@@ -27,6 +27,7 @@ import time
 import asyncio
 import logging
 import platform
+import socket
 from pathlib import Path
 
 # ── 先載入 .env.worker，再 import 任何會讀環境變數的模組 ──────────
@@ -89,6 +90,27 @@ _BACKOFF_MAX_S = 300
 
 # --login 模式最多等多久讓使用者完成登入
 LOGIN_WAIT_S = int(os.environ.get("LOGIN_WAIT_SECONDS", "420"))
+
+# Local TCP port used only as a single-instance lock. Binding to loopback does
+# not expose anything to the network. A second worker cannot bind the same port
+# and exits before it can claim duplicate patrol jobs.
+_INSTANCE_LOCK_PORT = int(os.environ.get("WORKER_INSTANCE_LOCK_PORT", "47631"))
+_instance_lock = None
+
+
+def _acquire_single_instance() -> None:
+    global _instance_lock
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock.bind(("127.0.0.1", _INSTANCE_LOCK_PORT))
+        lock.listen(1)
+    except OSError:
+        logger.error(
+            "Another local worker is already running (instance lock port %s).",
+            _INSTANCE_LOCK_PORT,
+        )
+        raise SystemExit(0)
+    _instance_lock = lock
 
 
 async def _claim(client: httpx.AsyncClient) -> dict | None:
@@ -230,6 +252,7 @@ async def main() -> None:
         logger.error("BOT_URL 或 BROWSER_WORKER_TOKEN 未設定（檢查 .env.worker）")
         sys.exit(1)
 
+    _acquire_single_instance()
     state.init_db()
     logger.info(f"worker「{WORKER_NAME}」啟動 → {BOT_URL}")
     logger.info(f"state: {os.environ['STATE_DB_PATH']}")
