@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import state
 from threads_client import ThreadsClient
-from ai_generator import generate_reply, generate_daily_topics, generate_proactive_reply, generate_short_reaction, generate_post_angles, is_patrol_worthy
+from ai_generator import generate_reply, generate_daily_topics, generate_post_drafts, generate_proactive_reply, generate_short_reaction, generate_post_angles, is_patrol_worthy
 from notifier import notify_error, notify_reply_for_approval, send_telegram
 
 logging.basicConfig(
@@ -219,6 +219,8 @@ async def lifespan(app: FastAPI):
     if state.get_kv("schedulers_enabled", False):
         scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=POLL_REPLIES_INTERVAL_MINUTES), id="poll_replies", replace_existing=True)
         scheduler.add_job(proactive_patrol_job, IntervalTrigger(hours=PATROL_INTERVAL_HOURS), id="proactive_patrol", replace_existing=True)
+        scheduler.add_job(daily_auto_post_job, CronTrigger(hour=10, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "morning"}, id="daily_post_morning", replace_existing=True)
+        scheduler.add_job(daily_auto_post_job, CronTrigger(hour=20, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "evening"}, id="daily_post_evening", replace_existing=True)
         logger.info("[持久化] schedulers_enabled=True，海巡 / 留言輪詢已自動啟動")
     scheduler.start()
     logger.info("Scheduler 啟動")
@@ -260,6 +262,42 @@ async def daily_draft_job(slot: str = "morning"):
     except Exception as e:
         logger.error(f"每日主題任務 [{slot}] 失敗: {e}")
         notify_error(f"每日主題 [{slot}] 失敗：{e}")
+
+
+async def daily_auto_post_job(slot: str = "morning"):
+    """每天早晚各自動發布一篇；以日期＋時段去重，部署重啟不會重複發。"""
+    from datetime import datetime
+    import pytz
+
+    today = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d")
+    dedup_key = f"last_auto_post_{slot}"
+    if state.get_kv(dedup_key) == today:
+        logger.info(f"daily_auto_post_job [{slot}]: 今日已發布，跳過")
+        return
+
+    client = None
+    try:
+        excluded = state.get_recent_topics(limit=21)
+        topics = generate_daily_topics(excluded_topics=excluded)
+        if not topics:
+            raise RuntimeError("沒有產生可用主題")
+        random.shuffle(topics)
+        drafts = generate_post_drafts(topics, count=1)
+        if not drafts or not drafts[0].get("draft", "").strip():
+            raise RuntimeError("沒有產生可用草稿")
+
+        draft = drafts[0]["draft"].strip()
+        client = get_client()
+        post_id = client.create_post(text=draft)
+        state.set_kv(dedup_key, today)
+        state.append_recent_topics([drafts[0].get("source_title") or topics[0]["title"]])
+        send_telegram(f"✅ 每日自動發文 [{slot}] 已發布\npost_id: {post_id}\n\n{draft}")
+    except Exception as e:
+        logger.error(f"每日自動發文 [{slot}] 失敗: {e}", exc_info=True)
+        notify_error(f"每日自動發文 [{slot}] 失敗：{e}")
+    finally:
+        if client:
+            client.close()
 
 
 async def poll_replies_job():
@@ -321,11 +359,11 @@ async def proactive_patrol_job(force: bool = False, keyword: str | None = None):
 async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None = None):
     reset_daily_count()
 
-    # 只在 07:00–00:00 Taipei 執行（force 模式不受限）
+    # 只在 09:00–21:00 Taipei 執行（force 模式不受限）
     from datetime import datetime
     import pytz
     h = datetime.now(pytz.timezone("Asia/Taipei")).hour
-    if not force and not (7 <= h < 24):
+    if not force and not (9 <= h < 21):
         return
 
     keyword = keyword or random.choice(SEARCH_KEYWORDS)
@@ -459,19 +497,51 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
             )
         return
 
-    # 推播發現的新貼文
-    lines = [f"📡 海巡｜「{keyword}」({search_mode})", ""]
+    # 為通過篩選的貼文生成回覆，並交給本機 worker 用 Threads UI 發布。
+    reply_tasks = []
+    for post in new_posts:
+        try:
+            reply_text = generate_proactive_reply(post.text, keyword)
+            if not reply_text:
+                reply_text = generate_short_reaction(post.text)
+            if reply_text:
+                reply_tasks.append({
+                    "shortcode": post.shortcode,
+                    "username": post.username,
+                    "reply_text": reply_text.strip(),
+                })
+        except Exception as e:
+            logger.error(f"[海巡] 生成 @{post.username} 回覆失敗: {e}")
+
+    reply_result = {"replied": [], "failed": []}
+    if reply_tasks:
+        reply_result = await search_and_reply_async(
+            keyword=keyword,
+            reply_tasks=reply_tasks,
+            skip_search=True,
+            search_mode=search_mode,
+        )
+
+    replied_ids = set(reply_result.get("replied", []))
+    failed_ids = set(reply_result.get("failed", []))
+
+    # 推播本輪結果
+    lines = [f"📡 海巡｜「{keyword}」({search_mode})｜已回覆 {len(replied_ids)}/{len(reply_tasks)}", ""]
     for i, post in enumerate(new_posts, 1):
         age_str = f" · {int(post.age_hours)}h前" if post.age_hours != 9999 else ""
         like_str = f" · ❤️{post.like_count}" if post.like_count > 0 else ""
-        lines.append(f"[{i}] @{post.username}{age_str}{like_str}")
+        status_mark = "✅" if post.shortcode in replied_ids else ("❌" if post.shortcode in failed_ids else "⏭")
+        lines.append(f"[{i}] {status_mark} @{post.username}{age_str}{like_str}")
         lines.append(post.text[:150] + ("…" if len(post.text) > 150 else ""))
+        task = next((t for t in reply_tasks if t["shortcode"] == post.shortcode), None)
+        if task:
+            lines.append(f"回覆：{task['reply_text']}")
         if post.shortcode:
             lines.append(f"https://www.threads.com/t/{post.shortcode}")
         lines.append("")
     send_telegram("\n".join(lines).strip())
 
-    # 標記已推播（patrol_push namespace，避免重複推）
+    # 成功或明確失敗都標記，避免下一小時重複騷擾同一篇；未生成回覆者也不重試。
     for post in new_posts:
         state.mark_processed("patrol_push", post.shortcode)
 
@@ -674,7 +744,7 @@ async def telegram_message_handler(request: Request):
 
     # ── 海巡控制 ──────────────────────────────────────
     if text == "海巡暫停":
-        for jid in ("proactive_patrol", "poll_replies"):
+        for jid in ("proactive_patrol", "poll_replies", "daily_post_morning", "daily_post_evening"):
             try:
                 scheduler.remove_job(jid)
             except Exception:
@@ -687,6 +757,8 @@ async def telegram_message_handler(request: Request):
         try:
             scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=POLL_REPLIES_INTERVAL_MINUTES), id="poll_replies", replace_existing=True)
             scheduler.add_job(proactive_patrol_job, IntervalTrigger(hours=PATROL_INTERVAL_HOURS), id="proactive_patrol", replace_existing=True)
+            scheduler.add_job(daily_auto_post_job, CronTrigger(hour=10, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "morning"}, id="daily_post_morning", replace_existing=True)
+            scheduler.add_job(daily_auto_post_job, CronTrigger(hour=20, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "evening"}, id="daily_post_evening", replace_existing=True)
             state.set_kv("schedulers_enabled", True)
             send_telegram("▶️ 海巡與留言回覆已恢復（狀態已保存，跨部署生效）")
         except Exception as e:
