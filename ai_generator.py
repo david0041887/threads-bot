@@ -959,7 +959,32 @@ def generate_post_drafts(source_articles: list[dict], count: int = 3) -> list[di
 - JSON 格式：[{{"draft":"內文（內含 \\n\\n 分隔 stanza）","angle":"切入角度","source_title":"主題標題"}}]
 """
 
-    user = f"""請根據以下主題，生成 {count} 篇風格各異的 Threads 發文草稿：
+    # Keep the production prompt deliberately short.  The old persona + six skeletons +
+    # lead-generation rules contradicted one another (especially when count == 1) and
+    # produced polished, formulaic copy instead of the account owner's voice.
+    system = f"""你是台灣保險經紀人的 Threads 寫作助手。
+
+把主題寫成像本人工作後隨手分享的一個觀察，不是文章、懶人包或銷售文。
+
+聲音：口語、克制、有實務感、有自己的判斷。每篇只談一件事，說到重點就停。
+有素材才寫場景、對話、金額或案例；禁止虛構客戶故事或補上素材沒有的事實。
+
+本次方向：
+{style_instructions}
+
+規則：
+- 每篇 80～220 個中文字，2～4 個自然段，不要刻意每句換行
+- 直接進入觀察；不用「換個角度看」「你知道嗎」「為什麼重要」
+- 不用「第一、第二、第三」「三件事」「總結來說」等整理文句型
+- 不故意反轉、不賣關子、不製造資訊缺口、不邀私訊、不推銷
+- 不用完美金句或人生哲理收尾，講完即可
+- 法律、稅務、理賠與制度性主張若素材沒有可靠依據，不補寫、不推論
+- 不加 hashtag
+- 輸出 JSON array，恰好 {count} 個物件，不加說明或 markdown
+- 格式：[{{"draft":"內文","angle":"切入角度","source_title":"主題標題"}}]
+"""
+
+    user = f"""請根據以下主題，生成 {count} 篇 Threads 發文草稿：
 
 {articles_text}
 
@@ -971,10 +996,9 @@ def generate_post_drafts(source_articles: list[dict], count: int = 3) -> list[di
 
     # 合規審查並修正每篇草稿（違規時交回原生成模型重寫，避免語氣被審查模型洗掉）
     # 注意：不能沿用上面的 system——它要求輸出 JSON array，重寫會回傳 JSON 而不是純文字。
-    regen_system = f"""{ACCOUNT_PERSONA}
-
-你在修正一篇已寫好的 Threads 貼文草稿，只處理合規問題。
-保留原本的骨架、語氣、段落換行、具體數字與立場，輸出純文字內文，不要 JSON、不要任何說明。"""
+    regen_system = """你只修正 Threads 草稿中的保險法規合規問題。
+維持原本自然、口語、克制的聲音，不新增銷售話術、文章骨架、條列、反轉或結論。
+不確定的制度、法律、稅務或數字直接刪掉，不要自行補寫。只輸出純文字內文。"""
     for d in drafts:
         d["draft"] = _apply_compliance(
             d["draft"],
@@ -1114,9 +1138,18 @@ NO：完全與保險無關——例如純美食、純旅遊、純股票投資、
         return False
 
 
-def _reply_passes_quality_gate(reply_text: str) -> bool:
+def _reply_passes_quality_gate(post_text: str, reply_text: str) -> bool:
     """步驟三：語意審查。PASS = 合格，FAIL = 丟棄。"""
-    system = """你是一個保險留言合規審查員。判斷以下留言是否違反任一規則：
+    system = """你是 Threads 留言品質審查員。對照原貼文判斷預計留言。
+
+只有同時滿足以下條件才 PASS：
+- 明確回應原貼文實際提到的情境，沒有腦補
+- 像真人的一句話，不像業務話術、客服、教科書或 AI 摘要
+- 有一個具體觀點或有用追問，不是萬用認同或「要看情況」
+- 不說教、不推銷、不邀私訊、不故意留資訊缺口
+- 沒有錯誤或過度肯定的保險、法律、稅務主張
+
+只輸出 PASS 或 FAIL。以下舊規則仍適用：
 
 規則一【排序】：是否暗示不同險種有先後順序或重要性差異？
 規則二【負面描述】：是否對任何保險商品說它「絕對不好」「沒有用」「完全不划算」？（注意：說終身型保費比定期貴、說終身型有缺點，這是本帳號的合規立場，不算違規；只有全盤否定某商品才算違規）
@@ -1127,7 +1160,11 @@ def _reply_passes_quality_gate(reply_text: str) -> bool:
 
 只輸出一個單字：PASS 或 FAIL，不加任何解釋。"""
     try:
-        result = _call_claude(system, reply_text.strip(), max_tokens=5)
+        result = _call_claude(
+            system,
+            f"原貼文：\n{post_text.strip()}\n\n預計留言：\n{reply_text.strip()}",
+            max_tokens=5,
+        )
         passes = result.strip().upper().startswith("PASS")
         if not passes:
             logger.info(f"[海巡] 步驟三 FAIL: {reply_text[:60]!r}")
@@ -1183,13 +1220,32 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 
 只輸出留言文字，或 <<SKIP>>。"""
 
+    # Override the legacy micro-fragment prompt. It rewarded shortness so strongly that
+    # the model emitted odd sentence fragments and generic assertions.
+    system = """你是台灣保險經紀人，在 Threads 看到一篇保險貼文。
+
+先判斷自己是否真的有一句值得補充的話。沒有就輸出 <<SKIP>>；少留言比硬蹭好。
+
+合格留言：
+- 12～38 個中文字，一到兩句，自然口語
+- 接住原文的一個具體情境、疑問或細節
+- 補一個小盲點，或問一個原文資訊足以支持的自然問題
+- 只講一件事；答案能講清楚就講清楚，不邀請私訊
+- 標點自然
+
+直接跳過：資訊不足、純抒發、純轉貼、需要看到保單才能回答、涉及法律稅務卻沒有來源。
+
+禁止：「確實」「真的很重要」「每個人不同」「這個要看狀況」「建議您」「歡迎諮詢」「私訊我」、空泛認同、業務招攬、虛構數字、替對方下診斷。
+
+只輸出留言文字，或 <<SKIP>>。"""
+
     user = f"""貼文：
 {post_text}"""
 
     try:
         result = _call_claude(system, user, max_tokens=200)
         cleaned = result.strip().strip('"').strip("'").strip()
-        if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 5:
+        if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 8 or len(cleaned) > 80:
             logger.info(f"[海巡] 步驟二跳過: {cleaned[:40]!r}")
             return ""
         # Defence-in-depth：攔截 Claude 仍然輸出解釋性文字的情況
@@ -1198,7 +1254,7 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
             logger.info(f"[海巡] 過濾 meta 解釋性回覆: {cleaned[:40]!r}")
             return ""
         # 步驟三
-        if not _reply_passes_quality_gate(cleaned):
+        if not _reply_passes_quality_gate(post_text, cleaned):
             return ""
         return _apply_compliance(cleaned, regen_system=system, regen_user=user, max_tokens=200)
     except Exception as e:

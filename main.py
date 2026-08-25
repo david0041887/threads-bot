@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import state
 from threads_client import ThreadsClient
-from ai_generator import generate_reply, generate_daily_topics, generate_post_drafts, generate_proactive_reply, generate_short_reaction, generate_post_angles, is_patrol_worthy
+from ai_generator import generate_reply, generate_daily_topics, generate_post_drafts, generate_proactive_reply, generate_post_angles, is_patrol_worthy
 from notifier import notify_error, notify_reply_for_approval, send_telegram
 
 logging.basicConfig(
@@ -505,8 +505,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     for post in new_posts:
         try:
             reply_text = generate_proactive_reply(post.text, keyword)
-            if not reply_text:
-                reply_text = generate_short_reaction(post.text)
+            # 沒有真正能補充的內容就不留言。短反應 fallback 容易變成硬蹭或萬用感想。
             if reply_text:
                 reply_tasks.append({
                     "shortcode": post.shortcode,
