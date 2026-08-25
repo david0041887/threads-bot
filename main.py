@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 #   remote —— 派給家裡筆電的 worker（住宅 IP，與 cookie 出身一致）。Railway 仍然
 #             負責排程、去重、AI 判斷與推播，只有「開瀏覽器」這件事搬走。
 BROWSER_WORKER_MODE = os.environ.get("BROWSER_WORKER_MODE", "local").lower()
+# 發文品質重新校準中：預設關閉每日自動發文。恢復前必須明確設為 true。
+AUTO_POSTS_ENABLED = os.environ.get("AUTO_POSTS_ENABLED", "false").lower() in ("1", "true", "yes")
 
 try:
     from threads_scraper import search_threads_by_keyword_async, get_profile_posts_async
@@ -219,8 +221,9 @@ async def lifespan(app: FastAPI):
     if state.get_kv("schedulers_enabled", False):
         scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=POLL_REPLIES_INTERVAL_MINUTES), id="poll_replies", replace_existing=True)
         scheduler.add_job(proactive_patrol_job, IntervalTrigger(hours=PATROL_INTERVAL_HOURS), id="proactive_patrol", replace_existing=True)
-        scheduler.add_job(daily_auto_post_job, CronTrigger(hour=10, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "morning"}, id="daily_post_morning", replace_existing=True)
-        scheduler.add_job(daily_auto_post_job, CronTrigger(hour=20, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "evening"}, id="daily_post_evening", replace_existing=True)
+        if AUTO_POSTS_ENABLED:
+            scheduler.add_job(daily_auto_post_job, CronTrigger(hour=10, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "morning"}, id="daily_post_morning", replace_existing=True)
+            scheduler.add_job(daily_auto_post_job, CronTrigger(hour=20, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "evening"}, id="daily_post_evening", replace_existing=True)
         logger.info("[持久化] schedulers_enabled=True，海巡 / 留言輪詢已自動啟動")
     scheduler.start()
     logger.info("Scheduler 啟動")
@@ -757,8 +760,9 @@ async def telegram_message_handler(request: Request):
         try:
             scheduler.add_job(poll_replies_job, IntervalTrigger(minutes=POLL_REPLIES_INTERVAL_MINUTES), id="poll_replies", replace_existing=True)
             scheduler.add_job(proactive_patrol_job, IntervalTrigger(hours=PATROL_INTERVAL_HOURS), id="proactive_patrol", replace_existing=True)
-            scheduler.add_job(daily_auto_post_job, CronTrigger(hour=10, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "morning"}, id="daily_post_morning", replace_existing=True)
-            scheduler.add_job(daily_auto_post_job, CronTrigger(hour=20, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "evening"}, id="daily_post_evening", replace_existing=True)
+            if AUTO_POSTS_ENABLED:
+                scheduler.add_job(daily_auto_post_job, CronTrigger(hour=10, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "morning"}, id="daily_post_morning", replace_existing=True)
+                scheduler.add_job(daily_auto_post_job, CronTrigger(hour=20, minute=0, timezone="Asia/Taipei"), kwargs={"slot": "evening"}, id="daily_post_evening", replace_existing=True)
             state.set_kv("schedulers_enabled", True)
             send_telegram("▶️ 海巡與留言回覆已恢復（狀態已保存，跨部署生效）")
         except Exception as e:
