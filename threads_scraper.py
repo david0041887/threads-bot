@@ -353,14 +353,28 @@ async def _is_logged_in(page, context) -> bool:
 
     只有伺服器吐回來的 DOM 反映伺服器的認定（2026-07 實測對照真實瀏覽器與
     未登入 Playwright，兩個指標都有鑑別力）：
-    - 已登入：無登入連結、有「新串文」撰寫入口
-    - 未登入：有登入連結、無撰寫入口
+    - 已登入：無登入連結，且有撰寫入口／活動頁／設定頁等登入後導覽
+    - 未登入：有登入連結，且沒有上述導覽
     """
     try:
         if await page.query_selector("a[href*='/login']"):
             return False
-        composer = await page.query_selector('svg[aria-label="新串文"], [aria-label*="新串文"]')
-        return composer is not None
+        # Threads 會不定期改動撰寫按鈕的中文（「新串文」曾改成「建立」），
+        # 只押一個 aria-label 會讓已登入頁面被誤判成登出。活動與設定連結也是
+        # 登入後才有的導覽，拿來做多訊號判斷，比文字文案穩定。
+        authenticated_ui = await page.query_selector(
+            ', '.join([
+                'svg[aria-label="新串文"]',
+                '[aria-label*="新串文"]',
+                '[aria-label*="建立"]',
+                '[aria-label*="Create"]',
+                '[aria-label*="發佈"]',
+                '[aria-label*="Post"]',
+                'a[href*="/activity"]',
+                'a[href*="/settings"]',
+            ])
+        )
+        return authenticated_ui is not None
     except Exception as e:
         logger.warning(f"[海巡] 登入狀態判斷失敗，保守視為未登入: {e}")
         return False
