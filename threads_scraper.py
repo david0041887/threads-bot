@@ -134,8 +134,9 @@ _POST_EXTRACT_JS = r"""el => {
     if (bestNode) {
         bestNode.querySelectorAll('img').forEach(img => {
             const src = img.currentSrc || img.src || '';
-            const w = img.naturalWidth || img.width || 0;
-            const h = img.naturalHeight || img.height || 0;
+            const rect = img.getBoundingClientRect();
+            const w = rect.width || 0;
+            const h = rect.height || 0;
             if (/^https:\/\//.test(src) && w >= 200 && h >= 120 && !imageUrls.includes(src)) imageUrls.push(src);
         });
     }
