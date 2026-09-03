@@ -445,7 +445,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     for post in results:
         if state.is_processed("patrol_push", post.shortcode):
             continue
-        if not post.text or len(post.text) < 20:
+        if (not post.text or len(post.text) < 20) and not (getattr(post, "image_data", None) or []):
             continue
         # 留言（別人貼文底下的回覆）一律跳過，只推原創貼文
         if getattr(post, "is_reply", False):
@@ -460,7 +460,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
             skip_old += 1
             continue
         # AI 相關性篩選：台灣 + 保險 + 發文者是潛在客戶（非同業推銷）
-        if not is_patrol_worthy(post.text):
+        if not is_patrol_worthy(post.text, image_data=getattr(post, "image_data", None)):
             skip_irrelevant += 1
             state.mark_processed("patrol_push", post.shortcode)  # 不相關也標記，避免重複判斷
             continue
@@ -504,7 +504,7 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     reply_tasks = []
     for post in new_posts:
         try:
-            reply_text = generate_proactive_reply(post.text, keyword)
+            reply_text = generate_proactive_reply(post.text, keyword, image_data=getattr(post, "image_data", None))
             # 沒有真正能補充的內容就不留言。短反應 fallback 容易變成硬蹭或萬用感想。
             if reply_text:
                 reply_tasks.append({

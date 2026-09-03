@@ -666,20 +666,29 @@ _COMPLIANCE_RULES = """
 """
 
 
-def _call_claude(system: str, user: str, max_tokens: int = 1000, model: Optional[str] = None) -> str:
+def _call_claude(system: str, user: str, max_tokens: int = 1000, model: Optional[str] = None, image_data: Optional[list[dict]] = None) -> str:
     headers = {
         "x-api-key": os.environ["ANTHROPIC_API_KEY"],
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
+    images = [i for i in (image_data or []) if isinstance(i, dict) and i.get("data")][:4]
+    content = (
+        [{"type": "image", "source": {"type": "base64", "media_type": i.get("media_type", "image/jpeg"), "data": i["data"]}} for i in images]
+        + [{"type": "text", "text": user}]
+        if images else user
+    )
     body = {
         "model": model or MODEL,
         "max_tokens": max_tokens,
         "system": system,
-        "messages": [{"role": "user", "content": user}],
+        "messages": [{"role": "user", "content": content}],
     }
     def _once():
         resp = httpx.post(ANTHROPIC_API, headers=headers, json=body, timeout=60)
+        # 有圖卻讀不到時必須失敗，讓海巡跳過該篇；退回純文字會重現「忽略圖片亂回」問題。
+        if images and resp.status_code >= 400:
+            logger.warning(f"[vision] 圖片無法讀取（HTTP {resp.status_code}），本篇保守跳過")
         resp.raise_for_status()
         return resp.json()["content"][0]["text"].strip()
     return _retry(_once)
@@ -1080,13 +1089,13 @@ def generate_reply(
     return _apply_compliance(reply, regen_system=system, regen_user=context, max_tokens=300)
 
 
-def is_patrol_worthy(post_text: str) -> bool:
+def is_patrol_worthy(post_text: str, image_data: Optional[list[dict]] = None) -> bool:
     """
     判斷貼文是否值得推播：台灣 + 保險 + 發文者是潛在客戶（或想跳槽的同業）。
     用 Haiku 降低成本。嚴格標準：無法確定就擋（寧可少推，不要推錯）。
     """
     system = """判斷這篇 Threads 貼文是否符合推播標準。
-必須同時滿足以下三條件才回答 YES。任一條件無法確定，就回答 NO：
+必須同時滿足以下三條件才回答 YES。文字與附帶圖片視為同一篇完整貼文；圖片裡的文字、表格與對話都要一起判斷。任一條件無法確定，就回答 NO：
 
 1. 主要內容在討論保險話題（保單、理賠、保費、壽險、醫療險、實支實付、失能、長照、遺產規劃等）。
    保險只是順帶一提、主要在聊生活美食旅遊股票政治感情的，回答 NO。
@@ -1116,7 +1125,7 @@ def is_patrol_worthy(post_text: str) -> bool:
 
 判斷不出來就是 NO。只輸出 YES 或 NO，不加任何說明。"""
     try:
-        result = _call_claude(system, post_text[:1500].strip(), max_tokens=5, model=COMPLIANCE_MODEL)
+        result = _call_claude(system, post_text[:1500].strip(), max_tokens=5, model=COMPLIANCE_MODEL, image_data=image_data)
         is_worthy = result.strip().upper().startswith("YES")
         logger.info(f"[海巡相關性] {'通過' if is_worthy else '過濾'}: {post_text[:40]!r}")
         return is_worthy
@@ -1125,9 +1134,9 @@ def is_patrol_worthy(post_text: str) -> bool:
         return False  # fail-closed：判斷不了就別推，寧可少推不要推錯
 
 
-def _is_insurance_related(post_text: str) -> bool:
+def _is_insurance_related(post_text: str, image_data: Optional[list[dict]] = None) -> bool:
     """步驟一：判斷貼文是否與保險有任何關聯（寬鬆過濾，只擋完全無關）。"""
-    system = """判斷這篇貼文是否跟「保險」有任何關聯，只輸出 YES 或 NO。
+    system = """判斷這篇貼文（含附帶圖片內容）是否跟「保險」有任何關聯，只輸出 YES 或 NO。
 
 YES：貼文有任何保險相關字眼、概念、或情境（商業保險、健保、業務員故事、理賠、保費都算）
 NO：完全與保險無關——例如純美食、純旅遊、純股票投資、純政治、純日常
@@ -1135,7 +1144,7 @@ NO：完全與保險無關——例如純美食、純旅遊、純股票投資、
 只要有一點保險角度就回 YES。確定完全無關才回 NO。
 只輸出 YES 或 NO，不加任何解釋。"""
     try:
-        result = _call_claude(system, post_text.strip(), max_tokens=5)
+        result = _call_claude(system, post_text.strip(), max_tokens=5, image_data=image_data)
         is_related = result.strip().upper().startswith("YES")
         logger.info(f"[海巡] 步驟一={'通過' if is_related else '跳過'}: {post_text[:40]!r}")
         return is_related
@@ -1144,9 +1153,11 @@ NO：完全與保險無關——例如純美食、純旅遊、純股票投資、
         return False
 
 
-def _reply_passes_quality_gate(post_text: str, reply_text: str) -> bool:
+def _reply_passes_quality_gate(post_text: str, reply_text: str, image_data: Optional[list[dict]] = None) -> bool:
     """步驟三：語意審查。PASS = 合格，FAIL = 丟棄。"""
     system = """你是 Threads 留言品質審查員。對照原貼文判斷預計留言。
+
+原貼文如有附帶圖片，必須把圖片文字、表格和對話一併納入判斷。
 
 只有同時滿足以下條件才 PASS：
 - 明確回應原貼文實際提到的情境，沒有腦補
@@ -1170,6 +1181,7 @@ def _reply_passes_quality_gate(post_text: str, reply_text: str) -> bool:
             system,
             f"原貼文：\n{post_text.strip()}\n\n預計留言：\n{reply_text.strip()}",
             max_tokens=5,
+            image_data=image_data,
         )
         passes = result.strip().upper().startswith("PASS")
         if not passes:
@@ -1208,7 +1220,7 @@ _PATROL_REPLY_EXAMPLES = """
 【好的回覆】保障名稱都有了，續保條件跟各項保額也要一起看
 【壞的回覆】建議先規劃醫療險，再依序補足重大傷病與意外保障
 """
-def generate_proactive_reply(post_text: str, keyword: str) -> str:
+def generate_proactive_reply(post_text: str, keyword: str, image_data: Optional[list[dict]] = None) -> str:
     """
     針對他人保險相關貼文生成主動回覆。三步驟過濾確保不發出 meta 解釋文字。
     步驟一：有無保險角度（NO → 靜默）
@@ -1217,7 +1229,7 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
     """
     import random as _random
     # 步驟一
-    if not _is_insurance_related(post_text):
+    if not _is_insurance_related(post_text, image_data=image_data):
         return ""
 
     # 步驟二：恢復舊版訓練過的語感與範例，但不載入含歷史衝突規則的整份 persona。
@@ -1226,7 +1238,7 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 
 今天的說話方式：{style}
 
-先找出原文的一個具體錨點（情境、疑問、金額、保障名稱、理賠結果或情緒），留言必須直接接著那個點說。找不到具體錨點，或需要看到完整保單才能回答，就輸出 <<SKIP>>。
+把貼文文字與附帶圖片視為同一份完整內容。先找出其中一個具體錨點（情境、疑問、金額、保障名稱、理賠結果或情緒），留言必須直接接著那個點說。圖片中的內容沒有看清楚就輸出 <<SKIP>>，不得猜測。找不到具體錨點，或需要看到完整保單才能回答，就輸出 <<SKIP>>。
 
 語感對照——學好的，不學壞的：
 {_PATROL_REPLY_EXAMPLES}
@@ -1248,7 +1260,7 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
 {post_text}"""
 
     try:
-        result = _call_claude(system, user, max_tokens=200)
+        result = _call_claude(system, user, max_tokens=200, image_data=image_data)
         cleaned = result.strip().strip('"').strip("'").strip()
         if not cleaned or "<<SKIP>>" in cleaned or len(cleaned) < 8 or len(cleaned) > 80:
             logger.info(f"[海巡] 步驟二跳過: {cleaned[:40]!r}")
@@ -1259,7 +1271,7 @@ def generate_proactive_reply(post_text: str, keyword: str) -> str:
             logger.info(f"[海巡] 過濾 meta 解釋性回覆: {cleaned[:40]!r}")
             return ""
         # 步驟三
-        if not _reply_passes_quality_gate(post_text, cleaned):
+        if not _reply_passes_quality_gate(post_text, cleaned, image_data=image_data):
             return ""
         return _apply_compliance(cleaned, regen_system=system, regen_user=user, max_tokens=200)
     except Exception as e:

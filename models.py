@@ -32,6 +32,8 @@ class ScrapedPost:
     like_count: int = 0    # 0 = 未知（API 未回傳）
     age_source: str = "無"  # 時間來源：DOM / API / 文字 / 無（診斷用）
     is_reply: bool = False  # 是否為別人貼文底下的留言（True 則海巡跳過）
+    image_urls: list[str] | None = None  # 貼文內容圖片；交給多模態模型讀取，最多 4 張
+    image_data: list[dict] | None = None  # 本機瀏覽器擷取後的 JPEG base64；避免 CDN 禁止模型抓取
 
     @property
     def id(self) -> str:

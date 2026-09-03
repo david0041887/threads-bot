@@ -118,9 +118,56 @@ _POST_EXTRACT_JS = r"""el => {
         const timeEl = node.querySelector('time[datetime]');
         if (timeEl) { datetime = timeEl.getAttribute('datetime') || ''; break; }
     }
-    return {text, username, mediaId, datetime};
+    // 找出只包含這一篇貼文的最大容器，再取其中的大圖；尺寸門檻會排除頭像與圖示。
+    let contentNode = el.parentElement, bestNode = contentNode;
+    for (let i = 0; i < 15 && contentNode; i++) {
+        const codes = new Set();
+        contentNode.querySelectorAll('a[href*="/post/"]').forEach(a => {
+            const mm = (a.getAttribute('href') || '').match(/\/post\/([A-Za-z0-9_-]+)/);
+            if (mm) codes.add(mm[1]);
+        });
+        if (codes.size > 1) break;
+        bestNode = contentNode;
+        contentNode = contentNode.parentElement;
+    }
+    const imageUrls = [];
+    if (bestNode) {
+        bestNode.querySelectorAll('img').forEach(img => {
+            const src = img.currentSrc || img.src || '';
+            const w = img.naturalWidth || img.width || 0;
+            const h = img.naturalHeight || img.height || 0;
+            if (/^https:\/\//.test(src) && w >= 200 && h >= 120 && !imageUrls.includes(src)) imageUrls.push(src);
+        });
+    }
+    return {text, username, mediaId, datetime, imageUrls: imageUrls.slice(0, 4)};
 }"""
 
+
+async def _capture_post_images(page, image_urls: list[str] | None) -> list[dict]:
+    """把貼文大圖由已登入瀏覽器截成 JPEG，避免 Claude 無法下載 Threads CDN URL。"""
+    wanted = set((image_urls or [])[:4])
+    if not wanted:
+        return []
+    captured: list[dict] = []
+    try:
+        for img in await page.query_selector_all("img"):
+            if len(captured) >= 4:
+                break
+            try:
+                src = await img.evaluate("el => el.currentSrc || el.src || ''")
+                if src not in wanted:
+                    continue
+                box = await img.bounding_box()
+                if not box or box["width"] < 150 or box["height"] < 100:
+                    continue
+                raw = await img.screenshot(type="jpeg", quality=72)
+                captured.append({"media_type": "image/jpeg", "data": base64.b64encode(raw).decode("ascii")})
+                wanted.remove(src)
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"[海巡] 擷取貼文圖片失敗：{e}")
+    return captured
 
 def _build_search_url(encoded_keyword: str, search_mode: str) -> str:
     """組搜尋網址。
@@ -644,15 +691,17 @@ async def search_threads_by_keyword_async(keyword: str, limit: int = 20, search_
                         age_hours = dom_age
                         source = "DOM"
 
-                    if not text or len(text) < 20:
+                    image_data = await _capture_post_images(page, result.get("imageUrls") or [])
+                    if (not text or len(text) < 20) and not image_data:
                         continue
                     if username.lower() == my_username:
                         continue
-
                     posts.append(ScrapedPost(
                         shortcode=shortcode, text=text, username=username,
                         media_id=media_id, age_hours=age_hours,
                         like_count=api_like_map.get(shortcode, 0), age_source=source,
+                        image_urls=result.get("imageUrls") or [],
+                        image_data=image_data,
                     ))
                     if len(posts) >= limit:
                         break
@@ -991,12 +1040,15 @@ async def search_and_reply_async(
                         if dom_age != 9999:
                             age_hours = dom_age
                             age_source = "DOM"
-                        if not text or len(text) < 20 or username.lower() == my_username:
+                        image_data = await _capture_post_images(page, result.get("imageUrls") or [])
+                        if ((not text or len(text) < 20) and not image_data) or username.lower() == my_username:
                             continue
                         posts.append(ScrapedPost(
                             shortcode=sc, text=text, username=username,
                             media_id=media_id, age_hours=age_hours,
                             like_count=api_like_map.get(sc, 0), age_source=age_source,
+                            image_urls=result.get("imageUrls") or [],
+                            image_data=image_data,
                         ))
                     except Exception:
                         pass
