@@ -62,7 +62,13 @@ else:
     if PLAYWRIGHT_AVAILABLE:
         logger.info("[海巡] local 模式：Railway 容器內執行瀏覽器")
 
-scheduler = AsyncIOScheduler()
+# Railway 啟動與兩分鐘留言輪詢可能讓工作晚 1～2 秒；APScheduler 預設只容許 1 秒，
+# 會把整次每小時海巡直接標成 missed。允許延遲 5 分鐘、合併積欠執行且禁止同工作重疊。
+scheduler = AsyncIOScheduler(job_defaults={
+    "misfire_grace_time": 300,
+    "coalesce": True,
+    "max_instances": 1,
+})
 
 SEARCH_KEYWORDS = [
     "保險", "壽險", "醫療險", "遺產稅", "節稅", "保費",
