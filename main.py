@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 BROWSER_WORKER_MODE = os.environ.get("BROWSER_WORKER_MODE", "local").lower()
 # 發文品質重新校準中：預設關閉每日自動發文。恢復前必須明確設為 true。
 AUTO_POSTS_ENABLED = os.environ.get("AUTO_POSTS_ENABLED", "false").lower() in ("1", "true", "yes")
+# 海巡自動留言：預設關閉，只推播可留言的貼文到 TG，由 David 自己決定要不要回。
+# 關閉時完全不呼叫 generate_proactive_reply、也不派 UI 留言任務給 worker。恢復前必須明確設為 true。
+PATROL_AUTO_REPLY_ENABLED = os.environ.get("PATROL_AUTO_REPLY_ENABLED", "false").lower() in ("1", "true", "yes")
 
 try:
     from threads_scraper import search_threads_by_keyword_async, get_profile_posts_async
@@ -351,7 +354,8 @@ async def poll_replies_job():
 
 
 async def proactive_patrol_job(force: bool = False, keyword: str | None = None):
-    """每 15 分鐘執行一次，用瀏覽器 UI 在串文底下直接回覆。force=True 可跳過時段限制。
+    """每 PATROL_INTERVAL_HOURS 執行一次：搜尋 → 篩選 → 推播到 TG。
+    PATROL_AUTO_REPLY_ENABLED=true 時才會用瀏覽器 UI 在串文底下直接回覆。force=True 可跳過時段限制。
 
     keyword 可指定關鍵字（測試用），省略則從 SEARCH_KEYWORDS 隨機挑。
     """
@@ -506,9 +510,9 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
             )
         return
 
-    # 為通過篩選的貼文生成回覆，並交給本機 worker 用 Threads UI 發布。
+    # 為通過篩選的貼文生成回覆，並交給本機 worker 用 Threads UI 發布（僅在開啟自動留言時）。
     reply_tasks = []
-    for post in new_posts:
+    for post in (new_posts if PATROL_AUTO_REPLY_ENABLED else []):
         try:
             reply_text = generate_proactive_reply(post.text, keyword, image_data=getattr(post, "image_data", None))
             # 沒有真正能補充的內容就不留言。短反應 fallback 容易變成硬蹭或萬用感想。
@@ -534,12 +538,18 @@ async def _proactive_patrol_job_inner(force: bool = False, keyword: str | None =
     failed_ids = set(reply_result.get("failed", []))
 
     # 推播本輪結果
-    lines = [f"📡 海巡｜「{keyword}」({search_mode})｜已回覆 {len(replied_ids)}/{len(reply_tasks)}", ""]
+    if PATROL_AUTO_REPLY_ENABLED:
+        lines = [f"📡 海巡｜「{keyword}」({search_mode})｜已回覆 {len(replied_ids)}/{len(reply_tasks)}", ""]
+    else:
+        lines = [f"📡 海巡｜「{keyword}」({search_mode})", ""]
     for i, post in enumerate(new_posts, 1):
         age_str = f" · {int(post.age_hours)}h前" if post.age_hours != 9999 else ""
         like_str = f" · ❤️{post.like_count}" if post.like_count > 0 else ""
-        status_mark = "✅" if post.shortcode in replied_ids else ("❌" if post.shortcode in failed_ids else "⏭")
-        lines.append(f"[{i}] {status_mark} @{post.username}{age_str}{like_str}")
+        if PATROL_AUTO_REPLY_ENABLED:
+            status_mark = "✅ " if post.shortcode in replied_ids else ("❌ " if post.shortcode in failed_ids else "⏭ ")
+        else:
+            status_mark = ""
+        lines.append(f"[{i}] {status_mark}@{post.username}{age_str}{like_str}")
         lines.append(post.text[:150] + ("…" if len(post.text) > 150 else ""))
         task = next((t for t in reply_tasks if t["shortcode"] == post.shortcode), None)
         if task:
