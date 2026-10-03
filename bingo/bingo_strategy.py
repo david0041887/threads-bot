@@ -13,7 +13,10 @@
   backtest  逐期回測各策略（每期只用之前的資料），對照電選（隨機）與理論值
   plan      回測貼文的追號方案（3星4倍、4星3倍8期、1星10倍4期、超級獎號、猜大小）
   verify    用開獎數據檢驗貼文每一條說法 vs 純隨機理論值
+  ev        各玩法中獎率、回收率（平常 vs 加碼）＋貼文追號方案的成本與可領金額
   demo      沒網路時用模擬資料跑一遍
+
+加碼：預設依開獎日期自動套用加碼獎金（--bonus auto）；--bonus on 全部當加碼算、--bonus off 全部不加碼
 
 範例
   python bingo_strategy.py fetch --days 14
@@ -21,6 +24,8 @@
   python bingo_strategy.py backtest --stars 3 --last 2000
   python bingo_strategy.py plan --strategy repeat,mix,random
   python bingo_strategy.py verify
+  python bingo_strategy.py ev
+  python bingo_strategy.py plan --bonus on
   python bingo_strategy.py pick --stars 4 --set hot.N=30,super.N=50 --weights repeat=2,hot=1,cold=0
 """
 from __future__ import annotations
@@ -65,6 +70,47 @@ PAYOUT = {
 }
 SUPER_PAYOUT = 1200  # 超級獎號（猜中當期第 20 個開出的號碼）
 BS_PAYOUT = 150      # 猜大小：6 倍
+
+# 加碼活動（依新聞報導整理，實際以台彩公告為準）
+BONUS_BASIC = {1: {1: 75}, 2: {2: 150}, 3: {3: 1000}, 4: {4: 2000, 3: 150},
+               5: {5: 10000, 4: 600}, 6: {6: 50000, 5: 1200}}  # 基本玩法 1~6 星 9 個獎項
+SUPER_BONUS, BS_BONUS = 1500, 175  # 超級獎號 1,500；猜大小／單雙 7 倍 175
+PROMOS = [  # (開始, 結束, 名稱, 基本玩法加碼, 超級獎號, 猜大小/單雙)
+    ("2026-02-27", "2026-03-03", "2026 元宵加碼", BONUS_BASIC, None, None),
+    ("2026-06-05", "2026-07-05", "2026 端午加碼", None, SUPER_BONUS, BS_BONUS),
+    ("2026-09-25", "2026-10-11", "2026 中秋加碼", None, SUPER_BONUS, BS_BONUS),
+    ("2026-10-08", "2026-10-09", "2026 中秋快閃", BONUS_BASIC, SUPER_BONUS, BS_BONUS),
+]
+BONUS_MODE = "auto"  # auto：依開獎日期套用；on：全部當加碼；off：全部不加碼
+
+
+def promos_on(d: str) -> list:
+    return [p for p in PROMOS if d and p[0] <= d <= p[1]]
+
+
+def prize(k: int, h: int, d: str = "") -> int:
+    """k 星中 h 個的單注獎金（d＝開獎日期，用來判斷加碼）"""
+    base = PAYOUT[k].get(h, 0)
+    if BONUS_MODE == "off":
+        return base
+    if BONUS_MODE == "on":
+        return BONUS_BASIC.get(k, {}).get(h, base)
+    for pm in promos_on(d):
+        if pm[3]:
+            base = pm[3].get(k, {}).get(h, base)
+    return base
+
+
+def super_prize(d: str = "") -> int:
+    if BONUS_MODE != "auto":
+        return SUPER_BONUS if BONUS_MODE == "on" else SUPER_PAYOUT
+    return max([pm[4] for pm in promos_on(d) if pm[4]] or [SUPER_PAYOUT])
+
+
+def bs_prize(d: str = "") -> int:
+    if BONUS_MODE != "auto":
+        return BS_BONUS if BONUS_MODE == "on" else BS_PAYOUT
+    return max([pm[5] for pm in promos_on(d) if pm[5]] or [BS_PAYOUT])
 
 
 # ───────────────────────── 資料 ─────────────────────────
@@ -622,10 +668,11 @@ def hg(N: int, K: int, n: int, x: int) -> float:
     return math.comb(K, x) * math.comb(N - K, n - x) / math.comb(N, n)
 
 
-def theory(k: int):
-    """k 星：中獎率、回收率"""
-    pwin = sum(hg(80, 20, k, h) for h in PAYOUT[k])
-    ev = sum(hg(80, 20, k, h) * v for h, v in PAYOUT[k].items()) / BET
+def theory(k: int, bonus: bool = False):
+    """k 星：中獎率、回收率（bonus＝用加碼獎金）"""
+    table = {**PAYOUT[k], **(BONUS_BASIC.get(k, {}) if bonus else {})}
+    pwin = sum(hg(80, 20, k, h) for h in table)
+    ev = sum(hg(80, 20, k, h) * v for h, v in table.items()) / BET
     return pwin, ev
 
 
@@ -818,7 +865,9 @@ def cmd_pick(a):
     print(f"\n猜大小（一版5、二版）：傾向「{sig['dir']}」（{votes}）")
     print(f"  已連續 {sig['drought']} 期沒開大小｜近 7 天同時段：{slot}｜"
           + ("可進場：6 倍追 4 期" if go else "觀望（要 15 期以上沒開、且同時段本週有開過大小）"))
-    print("\n追號參考（一版）：3星4倍追5~8期、4星3倍追8期（成本600）、1星10倍追4期（成本1000）→ 實測見 plan 指令")
+    print("\n加碼：" + promo_status(H.slot_of(t)[0] or datetime.now(TPE).date().isoformat()))
+    print("追號參考（一版）：3星4倍追5~8期、4星3倍追8期（成本600）、1星10倍追4期（成本1000）"
+          "→ 成本與可領金額見 ev，實測見 plan")
 
 
 def cmd_backtest(a):
@@ -832,12 +881,17 @@ def cmd_backtest(a):
         sys.exit(f"資料不足：至少要 {a.warmup + 1} 期")
     print(f"回測 {k} 星：{H.draws[t0].term} ~ {H.draws[-1].term}，共 {n} 期（每期只用之前的資料選號）")
     dist = {key: Counter() for key in keys}
+    paid, wins = Counter(), Counter()
     sup, sup_n, bs_ok, bs_n = Counter(), 0, 0, 0
     for t in range(t0, H.T):
         for key in keys:
             ps = pick(H, t, key, k)
             if ps is not None:
-                dist[key][len(H.sets[t].intersection(ps))] += 1
+                h = len(H.sets[t].intersection(ps))
+                v = prize(k, h, H.draws[t].date)
+                dist[key][h] += 1
+                paid[key] += v
+                wins[key] += v > 0
         sn = H.draws[t].super_no
         if sn:
             sup_n += 1
@@ -850,7 +904,8 @@ def cmd_backtest(a):
                 bs_n += 1
                 bs_ok += d == H.bs[t]
     var1 = k * 0.25 * 0.75 * (80 - k) / 79
-    pwin, ev = theory(k)
+    pwin, ev = theory(k, BONUS_MODE == "on")
+    print(bonus_note(H, t0))
     print("\n" + pad("策略", 14) + rpad("下注期", 7) + rpad("平均中", 8) + rpad("z值", 7)
           + rpad("中獎率", 8) + rpad("回收率", 8) + "   中獎分布（中幾個:期數）")
     print(pad("理論(隨機)", 14) + rpad("", 7) + f"{k / 4:>8.3f}{0:>7.2f}{pwin:>8.1%}{ev:>8.1%}")
@@ -861,17 +916,17 @@ def cmd_backtest(a):
             print(pad(STRATS[key].name, 14) + rpad("0", 7) + "   （期間內沒觸發）")
             continue
         avg = sum(h * c for h, c in d.items()) / m
-        win = sum(c for h, c in d.items() if h in PAYOUT[k]) / m
-        roi = sum(PAYOUT[k].get(h, 0) * c for h, c in d.items()) / (BET * m)
+        win = wins[key] / m
+        roi = paid[key] / (BET * m)
         z = (avg - k / 4) / math.sqrt(var1 / m)
         print(pad(STRATS[key].name, 14) + f"{m:>7}{avg:>8.3f}{z:>7.2f}{win:>8.1%}{roi:>8.1%}   "
               + " ".join(f"{h}:{d[h]}" for h in sorted(d)))
     if sup_n:
         print(f"\n超級獎號 2 碼（{sup_n} 期）：三版策略命中 {sup['super'] / sup_n:.2%}｜電選 {sup['random'] / sup_n:.2%}"
-              f"｜理論 2.50%（回收率 {SUPER_PAYOUT / BET / 80:.0%}）")
+              f"｜理論 2.50%（回收率平常 {SUPER_PAYOUT / BET / 80:.0%}、加碼 {SUPER_BONUS / BET / 80:.0%}）")
     if bs_n:
         print(f"猜大小方向（{bs_n} 期有開大小）：猜中 {bs_ok / bs_n:.1%}｜理論 50.0%")
-    print("\nz 值：|z| < 2 ＝ 跟電選（隨機）沒有顯著差異；回收率 ＝ 獎金 ÷ 投注金額（未含加碼）")
+    print("\nz 值：|z| < 2 ＝ 跟電選（隨機）沒有顯著差異；回收率 ＝ 獎金 ÷ 投注金額")
 
 
 PLANS = [  # (方案, 出處, 類型, 星數/碼數, 倍數, 期數)
@@ -905,12 +960,13 @@ def run_plan(H, kind, key, k, mult, periods, t0, stop):
         cost = pay = wins = 0
         for j in range(periods):
             i = t + j
+            d = H.draws[i].date
             if kind == "bs":
-                p, c = (BS_PAYOUT if H.bs[i] == target else 0), BET
+                p, c = (bs_prize(d) if H.bs[i] == target else 0), BET
             elif kind == "super":
-                p, c = (SUPER_PAYOUT if H.draws[i].super_no in ps else 0), BET * len(ps)
+                p, c = (super_prize(d) if H.draws[i].super_no in ps else 0), BET * len(ps)
             else:
-                p, c = PAYOUT[k].get(len(H.sets[i] & ps), 0), BET
+                p, c = prize(k, len(H.sets[i] & ps), d), BET
             cost += c * mult
             pay += p * mult
             wins += p > 0
@@ -928,17 +984,19 @@ def cmd_plan(a):
     t0 = max(a.warmup, H.T - a.last)
     print(f"追號方案回測：{H.draws[t0].term} ~ {H.draws[-1].term}（{H.T - t0} 期）｜"
           + ("中了就停" if a.stop else "每期都買滿") + "｜一輪結束才開下一輪")
+    print(bonus_note(H, t0))
+    on = BONUS_MODE == "on"
     print("\n" + pad("方案（出處）", 34) + pad("選號", 14) + rpad("輪數", 6) + rpad("至少中1次", 11)
           + rpad("賺錢輪", 8) + rpad("平均成本", 10) + rpad("平均獎金", 10) + rpad("回收率", 8))
     for name, src, kind, k, mult, periods in PLANS:
         if kind == "num":
-            ks, pwin, roi = keys, theory(k)[0], theory(k)[1]
+            ks, (pwin, roi) = keys, theory(k, on)
         elif kind == "outside":
-            ks, pwin, roi = ["outside", "random"], theory(k)[0], theory(k)[1]
+            ks, (pwin, roi) = ["outside", "random"], theory(k, on)
         elif kind == "super":
-            ks, pwin, roi = ["super", "random"], k / 80, SUPER_PAYOUT / BET / 80
+            ks, pwin, roi = ["super", "random"], k / 80, (SUPER_BONUS if on else SUPER_PAYOUT) / BET / 80
         else:
-            ks, pwin, roi = ["bs", "random"], P_BIG, BS_PAYOUT / BET * P_BIG
+            ks, pwin, roi = ["bs", "random"], P_BIG, (BS_BONUS if on else BS_PAYOUT) / BET * P_BIG
         title = f"{name}（{src}）"
         for key in ks:
             res = run_plan(H, kind, key, k, mult, periods, t0, a.stop)
@@ -954,6 +1012,77 @@ def cmd_plan(a):
         print(pad("", 34) + pad("理論值", 14) + rpad("", 6) + f"{1 - (1 - pwin) ** periods:>11.1%}"
               + rpad("", 8) + rpad("", 10) + rpad("", 10) + f"{roi:>8.1%}")
     print("\n回收率 < 100% ＝ 長期會虧；每一注的期望值固定，追幾期、幾倍只改變波動，不改變回收率")
+
+
+def promo_status(d: str) -> str:
+    """某天的加碼狀態 + 30 天內下一檔"""
+    now = promos_on(d)
+    parts = []
+    for pm in now:
+        items = []
+        if pm[3]:
+            items.append("1~6星 9 獎項（3星中3 1,000、4星中4 2,000…）")
+        if pm[4]:
+            items.append(f"超級獎號 {pm[4]:,}")
+        if pm[5]:
+            items.append(f"猜大小/單雙 {pm[5]}")
+        parts.append(f"{pm[2]} {pm[0][5:]}~{pm[1][5:]}：" + "、".join(items))
+    txt = "；".join(parts) if parts else "目前沒有加碼"
+    try:
+        lim = (date.fromisoformat(d) + timedelta(days=30)).isoformat()
+        nxt = [pm for pm in PROMOS if d < pm[0] <= lim]
+    except ValueError:
+        nxt = []
+    if nxt:
+        pm = min(nxt)
+        txt += f"｜下一檔 {pm[2]} {pm[0][5:]}~{pm[1][5:]}" + ("（基本玩法 1~6 星加碼）" if pm[3] else "")
+    return txt
+
+
+def bonus_note(H: Hist, t0: int) -> str:
+    if BONUS_MODE == "on":
+        return "獎金：全部以加碼獎金計算（--bonus on）"
+    if BONUS_MODE == "off":
+        return "獎金：全部以平常獎金計算（--bonus off）"
+    pms = [promos_on(H.draws[t].date) for t in range(t0, H.T)]
+    nb = sum(any(pm[3] for pm in x) for x in pms)
+    ns = sum(any(pm[4] for pm in x) for x in pms)
+    return f"獎金：依開獎日期套用加碼（期間內 1~6 星加碼 {nb} 期、超級獎號／猜大小加碼 {ns} 期）"
+
+
+def cmd_ev(a):
+    print("各玩法中獎率／回收率（回收率＝長期平均每投 100 元拿回多少）\n")
+    print(pad("玩法", 10) + rpad("中獎率", 9) + rpad("平常", 9) + rpad("加碼", 9) + "   加碼獎項")
+    for k in range(1, 11):
+        pw, ev0 = theory(k)
+        _, ev1 = theory(k, True)
+        b = "、".join(f"中{h} {PAYOUT[k][h]:,}→{v:,}" for h, v in sorted(BONUS_BASIC.get(k, {}).items(), reverse=True))
+        print(pad(f"{k}星", 10) + f"{pw:>9.1%}{ev0:>9.1%}{ev1:>9.1%}   {b}")
+    print(pad("超級獎號", 10) + f"{1 / 80:>9.2%}{SUPER_PAYOUT / BET / 80:>9.1%}{SUPER_BONUS / BET / 80:>9.1%}"
+          f"   {SUPER_PAYOUT:,}→{SUPER_BONUS:,}")
+    print(pad("猜大小", 10) + f"{P_BIG:>9.1%}{BS_PAYOUT / BET * P_BIG:>9.1%}{BS_BONUS / BET * P_BIG:>9.1%}"
+          f"   {BS_PAYOUT}→{BS_BONUS}")
+    print("\n貼文追號方案（每期都買滿）")
+    print(pad("方案", 26) + rpad("成本", 7) + rpad("至少中1次", 11) + "   最高可領（平常→加碼）"
+          + "   平均拿回（平常→加碼）")
+    rows = [("3星4倍 追10期", 3, 4, 10), ("3星4倍 追8期", 3, 4, 8), ("3星4倍 追5期", 3, 4, 5),
+            ("4星3倍 追8期", 4, 3, 8), ("1星10倍 追4期", 1, 10, 4), ("2星10倍 追4期", 2, 10, 4)]
+    for name, k, m, n in rows:
+        cost = BET * m * n
+        top0, top1 = PAYOUT[k][k] * m, BONUS_BASIC[k][k] * m
+        print(pad(name, 26) + f"{cost:>7,}{1 - (1 - theory(k)[0]) ** n:>11.1%}"
+              + pad(f"   中{k}個 {top0:,}→{top1:,}/期", 25)
+              + f"   {cost * theory(k)[1]:,.0f}→{cost * theory(k, True)[1]:,.0f}")
+    cost = BET * 2 * 2 * 3
+    print(pad("超級獎號2碼 2倍 追3期", 26) + f"{cost:>7,}{1 - (1 - 2 / 80) ** 3:>11.1%}"
+          + pad(f"   {SUPER_PAYOUT * 2:,}→{SUPER_BONUS * 2:,}/期", 25)
+          + f"   {cost * SUPER_PAYOUT / BET / 80:,.0f}→{cost * SUPER_BONUS / BET / 80:,.0f}")
+    cost = BET * 6 * 4
+    print(pad("猜大小6倍 追4期", 26) + f"{cost:>7,}{1 - (1 - P_BIG) ** 4:>11.1%}"
+          + pad(f"   {BS_PAYOUT * 6:,}→{BS_BONUS * 6:,}/期", 25)
+          + f"   {cost * BS_PAYOUT / BET * P_BIG:,.0f}→{cost * BS_BONUS / BET * P_BIG:,.0f}")
+    print("\n今天：" + promo_status(datetime.now(TPE).date().isoformat()))
+    print("加碼金額依新聞報導整理，實際以台彩公告為準；改程式開頭的 BONUS_BASIC／PROMOS 即可")
 
 
 def cmd_verify(a):
@@ -1087,6 +1216,8 @@ def main(argv=None):
     rng = argparse.ArgumentParser(add_help=False)
     rng.add_argument("--last", type=int, default=2000, help="回測最近幾期（預設 2000）")
     rng.add_argument("--warmup", type=int, default=60, help="前面保留幾期當暖身資料")
+    st.add_argument("--bonus", choices=["auto", "on", "off"], default="auto",
+                    help="加碼獎金：auto 依日期（預設）、on 全部加碼、off 不加碼")
 
     p = argparse.ArgumentParser(description="賓果賓果選號策略程式（Threads 攻略一～四版）", epilog=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1110,6 +1241,7 @@ def main(argv=None):
     pl.add_argument("--stop", action="store_true", help="中了就停（預設每期都買滿）")
     pl.set_defaults(func=cmd_plan)
     sub.add_parser("verify", parents=[common], help="用數據檢驗貼文說法").set_defaults(func=cmd_verify)
+    sub.add_parser("ev", help="中獎率、回收率、追號成本（平常 vs 加碼）").set_defaults(func=cmd_ev)
     d = sub.add_parser("demo", parents=[st], help="用模擬資料跑一遍")
     d.add_argument("--days", type=int, default=10)
     d.add_argument("--seed", type=int, default=1)
@@ -1117,6 +1249,8 @@ def main(argv=None):
     d.add_argument("--warmup", type=int, default=60)
     d.set_defaults(func=cmd_demo)
     a = p.parse_args(argv)
+    global BONUS_MODE
+    BONUS_MODE = getattr(a, "bonus", "auto")
     a.func(a)
 
 
