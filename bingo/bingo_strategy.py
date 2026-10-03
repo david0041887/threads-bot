@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-賓果賓果（BINGO BINGO）選號策略程式 — 純 Python 標準函式庫，免安裝套件（Python 3.8+）
+賓果賓果（BINGO BINGO）選號策略程式 — 整合 Threads 攻略一～四版 + 台彩開獎數據
+純 Python 標準函式庫，免安裝套件（Python 3.8+）
 
 指令
-  fetch     抓台彩官方開獎資料，存成 bingo_history.csv
+  fetch     抓台彩官方開獎資料 → bingo_history.csv
   import    匯入 CSV/TXT 開獎資料（台彩歷史下載檔、自己整理的號碼都可以）
-  stats     冷熱號、遺漏、連莊、尾數、區間、大小單雙、超級獎號統計
-  pick      產生下一期選號
-  backtest  逐期回測（每期只用「當期以前」的資料），對照隨機與理論值
+  list      列出所有策略與貼文出處
+  stats     盤面統計：連莊、冷熱號、遺漏、尾數、大小、超級獎號
+  pick      依貼文策略產生下一期選號 + 超級獎號 + 猜大小建議
+  backtest  逐期回測各策略（每期只用之前的資料），對照電選（隨機）與理論值
+  plan      回測貼文的追號方案（3星4倍、4星3倍8期、1星10倍4期、超級獎號、猜大小）
+  verify    用開獎數據檢驗貼文每一條說法 vs 純隨機理論值
   demo      沒網路時用模擬資料跑一遍
 
 範例
   python bingo_strategy.py fetch --days 14
-  python bingo_strategy.py stats
-  python bingo_strategy.py pick --stars 4
-  python bingo_strategy.py pick --stars 3 --strategy hot,drag,mix --fetch
-  python bingo_strategy.py backtest --stars 4 --last 1000
-  python bingo_strategy.py pick --stars 5 --set hot.N=50,drag.W=1000 --weights hot=2,drag=1,cold=0
+  python bingo_strategy.py pick --stars 3 --fetch
+  python bingo_strategy.py backtest --stars 3 --last 2000
+  python bingo_strategy.py plan --strategy repeat,mix,random
+  python bingo_strategy.py verify
+  python bingo_strategy.py pick --stars 4 --set hot.N=30,super.N=50 --weights repeat=2,hot=1,cold=0
 """
 from __future__ import annotations
 
@@ -60,6 +64,7 @@ PAYOUT = {
     10: {10: 5000000, 9: 250000, 8: 25000, 7: 2500, 6: 250, 5: 25, 0: 25},
 }
 SUPER_PAYOUT = 1200  # 超級獎號（猜中當期第 20 個開出的號碼）
+BS_PAYOUT = 150      # 猜大小：6 倍
 
 
 # ───────────────────────── 資料 ─────────────────────────
@@ -76,6 +81,7 @@ class Draw:
 
 
 def big_small(d: Draw) -> str:
+    """猜大小：41~80 開 13 個以上＝大，01~40 開 13 個以上＝小，其他＝－（沒開）"""
     big = sum(1 for n in d.nums if n >= 41)
     return "大" if big >= 13 else "小" if big <= 7 else "－"
 
@@ -303,10 +309,18 @@ class Hist:
         self.draws = draws
         self.sets = [d.s for d in draws]
         self.T = len(draws)
+        self.bs = [big_small(d) for d in draws]
         self.apps = [[] for _ in range(81)]  # 每個號碼出現在第幾期（索引）
         for i, s in enumerate(self.sets):
             for n in s:
                 self.apps[n].append(i)
+        self.slot, self.at = [], {}  # 當天第幾期（0 起算）
+        prev, k = None, 0
+        for i, d in enumerate(draws):
+            k = k + 1 if d.date == prev else 0
+            prev = d.date
+            self.slot.append(k)
+            self.at[(d.date, k)] = i
         self._t, self._m = None, {}
 
     def _memo(self, t, key, fn):
@@ -317,7 +331,7 @@ class Hist:
         return self._m[key]
 
     def freq(self, t: int, N: int) -> Counter:
-        """第 t 期之前 N 期，各號碼出現次數"""
+        """第 t 期之前 N 期，各號碼開出次數"""
         return self._memo(t, ("f", N), lambda: Counter(chain.from_iterable(self.sets[max(0, t - N):t])))
 
     def gaps(self, t: int) -> dict:
@@ -331,28 +345,57 @@ class Hist:
             return g
         return self._memo(t, ("g",), calc)
 
-    def drag(self, t: int, W: int) -> Counter:
-        """拖牌：上期每個號碼 i，近 W 期內「i 開出後下一期」各號碼出現機率，加總"""
+    def streaks(self, t: int) -> dict:
+        """上期開出的號碼，各已連開幾期"""
         def calc():
-            last, score, lo = self.sets[t - 1], Counter(), max(0, t - 1 - W)
-            for i in last:
-                a = self.apps[i]
-                idxs = a[bisect.bisect_left(a, lo):bisect.bisect_left(a, t - 1)]
-                if not idxs:
-                    continue
-                c = Counter(chain.from_iterable(self.sets[x + 1] for x in idxs))
-                inv = 1.0 / len(idxs)
-                for n, v in c.items():
-                    score[n] += v * inv
-            return score
-        return self._memo(t, ("d", W), calc)
+            out = {}
+            for n in self.sets[t - 1]:
+                s = 1
+                while t - 1 - s >= 0 and n in self.sets[t - 1 - s]:
+                    s += 1
+                out[n] = s
+            return out
+        return self._memo(t, ("s",), calc)
+
+    def pair_rep(self, t: int, N: int) -> Counter:
+        """近 N 期內各號碼「連續兩期都開」的次數（連莊次數）"""
+        return self._memo(t, ("p", N), lambda: Counter(chain.from_iterable(
+            self.sets[i] & self.sets[i - 1] for i in range(max(1, t - N), t))))
+
+    def rep_count(self, t: int) -> int:
+        """上期與前一期重複幾顆"""
+        return len(self.sets[t - 1] & self.sets[t - 2]) if t >= 2 else 99
+
+    def slot_of(self, t: int):
+        """第 t 期的（日期, 當天第幾期）；t == T 代表下一期"""
+        if t < self.T:
+            return self.draws[t].date, self.slot[t]
+        d, s = self.draws[-1].date, self.slot[-1] + 1
+        if s >= 203 and d:
+            d, s = (date.fromisoformat(d) + timedelta(days=1)).isoformat(), 0
+        return d, s
+
+    def same_slot(self, t: int, days: int = 7) -> list:
+        """近 days 天同一時段的猜大小結果"""
+        d, s = self.slot_of(t)
+        try:
+            base = date.fromisoformat(d)
+        except ValueError:
+            return []
+        out = []
+        for i in range(1, days + 1):
+            j = self.at.get(((base - timedelta(days=i)).isoformat(), s))
+            if j is not None:
+                out.append(self.bs[j])
+        return out
 
 
-# ───────────── 選號策略 ─────────────
+# ───────────── 選號策略（出處＝Threads 攻略版本與條目） ─────────────
 @dataclass
 class Strat:
     key: str
     name: str
+    src: str
     desc: str
     fn: Callable
     params: dict
@@ -361,66 +404,114 @@ class Strat:
 STRATS: dict = {}
 
 
-def strategy(key, name, desc, **params):
+def strategy(key, name, src, desc, **params):
     def deco(fn):
-        STRATS[key] = Strat(key, name, desc, fn, params)
+        STRATS[key] = Strat(key, name, src, desc, fn, params)
         return fn
     return deco
 
 
-# 以下為通用策略（貼文策略待補）。每個策略回傳 {號碼: 分數}，分數高者優先
-@strategy("hot", "熱號", "近 N 期出現次數最多", N=30)
-def s_hot(H, t, P):
+# 每個策略回傳 {號碼: 分數}（高分優先）、號碼 list（依序），或 None（條件不成立＝這期不下注）
+@strategy("repeat", "連莊號", "一版1、四版3、二版10",
+          "上期號碼中「連開2~3次」優先、排除已連開≥4次；同級再比近 N 期連莊次數", N=20, max_streak=3)
+def s_repeat(H, t, P, k):
+    st, pr, c = H.streaks(t), H.pair_rep(t, P["N"]), H.freq(t, P["N"])
+
+    def tier(n):
+        s = st.get(n, 0)
+        return -1 if s > P["max_streak"] else 2 if s >= 2 else 1 if s == 1 else 0
+    return {n: tier(n) * 1000 + pr[n] * 10 + c[n] for n in NUMS}
+
+
+@strategy("hot", "熱門前十", "一版2", "近 N 期開出次數最多的號碼（貼文：前十熱號下期常開 3 顆）", N=20)
+def s_hot(H, t, P, k):
     return H.freq(t, P["N"])
 
 
-@strategy("cold", "冷號回補", "遺漏期數最多（最久沒開）")
-def s_cold(H, t, P):
-    return H.gaps(t)
-
-
-@strategy("repeat", "連莊號", "上期開出號碼，依近 N 期熱度排序", N=10)
-def s_repeat(H, t, P):
+@strategy("direct", "直攻上期", "一版3",
+          "上期與前一期重複 < 2 顆才下注：直接選上期號碼（建議 4~5 星）", max_rep=1, N=20)
+def s_direct(H, t, P, k):
+    if H.rep_count(t) > P["max_rep"]:
+        return None
     last, c = H.sets[t - 1], H.freq(t, P["N"])
     return {n: (1000 if n in last else 0) + c[n] for n in NUMS}
 
 
-@strategy("drag", "拖牌", "上期號碼在歷史上「下一期」最常跟出的號碼（近 W 期）", W=600)
-def s_drag(H, t, P):
-    return H.drag(t, P["W"])
+@strategy("tail", "冷尾數同尾組", "二版1、四版7、一版4",
+          "近 N 期開最少的尾數，選同尾號碼（如 21.31.41.51.61）；尾數內挑近 M 期較熱的", N=5, M=30)
+def s_tail(H, t, P, k):
+    rc, c = H.freq(t, P["N"]), H.freq(t, P["M"])
+    tail = {d: 0 for d in range(10)}
+    for n in NUMS:
+        tail[n % 10] += rc[n]
+    rank = {d: i for i, d in enumerate(sorted(range(10), key=lambda d: (tail[d], d)))}  # 0 = 最冷
+    return {n: (10 - rank[n % 10]) * 1000 + c[n] for n in NUMS}
 
 
-@strategy("neighbor", "鄰號(邊號)", "上期號碼 ±1 的號碼", N=20)
-def s_neighbor(H, t, P):
+@strategy("combo", "自選組合", "二版2、3、5、6、7、10",
+          "2熱1冷（冷＝遺漏≥10期）、大小拆散、不連號、排除連開≥4；奇數星多的那顆給上期少開的那邊", N=20, cold_gap=10)
+def s_combo(H, t, P, k):
+    c, g, st = H.freq(t, P["N"]), H.gaps(t), H.streaks(t)
+    n_cold = 0 if k == 1 else max(1, round(k / 3))
+    prev_big = sum(1 for n in H.sets[t - 1] if n >= 41)
+    n_big = k // 2 + (k % 2 if prev_big < 10 else 0)  # 前期開大 → 下期偏小，反之亦然
+    hot = [n for n in sorted(NUMS, key=lambda n: (-c[n], n)) if st.get(n, 0) < 4]
+    cold = [n for n in sorted(NUMS, key=lambda n: (-g[n], n)) if g[n] >= P["cold_gap"]]
+    picks = []
+
+    def ok(n, quota):
+        if n in picks or any(abs(n - p) == 1 for p in picks):  # 不連號
+            return False
+        if quota:
+            nb = sum(p >= 41 for p in picks)
+            if (n >= 41 and nb >= n_big) or (n <= 40 and len(picks) - nb >= k - n_big):
+                return False
+        return True
+
+    for n in cold:
+        if len(picks) >= n_cold:
+            break
+        if ok(n, True):
+            picks.append(n)
+    for quota in (True, False):
+        for n in hot:
+            if len(picks) >= k:
+                break
+            if ok(n, quota):
+                picks.append(n)
+    return picks
+
+
+@strategy("outside", "非上期熱門", "四版6、二版8",
+          "近 N 期熱門但不在上期 20 碼內（四版：三星 2 倍撿零錢）；min_rep>0 時只在上期重複≥min_rep 顆才下注（二版8）",
+          N=20, min_rep=0)
+def s_outside(H, t, P, k):
+    if P["min_rep"] and H.rep_count(t) < P["min_rep"]:
+        return None
     last, c = H.sets[t - 1], H.freq(t, P["N"])
-    return {n: ((n - 1 in last) + (n + 1 in last)) * 1000 + c[n] for n in NUMS}
+    return {n: -1 if n in last else c[n] for n in NUMS}
 
 
-@strategy("tail", "熱尾數(直行)", "近 N 期最熱尾數，再挑該尾數最熱號碼", N=20)
-def s_tail(H, t, P):
-    c, tail = H.freq(t, P["N"]), Counter()
-    for n in NUMS:
-        tail[n % 10] += c[n]
-    return {n: tail[n % 10] * 1000 + c[n] for n in NUMS}
+@strategy("neighbor", "隔壁號", "四版1、2", "上期號碼的隔壁（±1）且不在上期；兩邊都相鄰的優先", N=20)
+def s_neighbor(H, t, P, k):
+    last, c = H.sets[t - 1], H.freq(t, P["N"])
+    return {n: ((n - 1 in last) + (n + 1 in last)) * 1000 + (0 if n in last else 100) + c[n] for n in NUMS}
 
 
-@strategy("zone", "熱區(橫列)", "01-10…71-80 八區中近 N 期最熱的區", N=20)
-def s_zone(H, t, P):
-    c, zone = H.freq(t, P["N"]), Counter()
-    for n in NUMS:
-        zone[(n - 1) // 10] += c[n]
-    return {n: zone[(n - 1) // 10] * 1000 + c[n] for n in NUMS}
+@strategy("cold", "10期未開", "二版7", "遺漏 ≥10 期的號碼，遺漏越久越優先")
+def s_cold(H, t, P, k):
+    return H.gaps(t)
 
 
-@strategy("super", "超級獎號熱號", "近 N 期超級獎號出現次數（超級獎號玩法用）", N=400)
-def s_super(H, t, P):
-    return Counter(d.super_no for d in H.draws[max(0, t - P["N"]):t] if d.super_no)
-
-
-@strategy("random", "隨機(對照組)", "純隨機，用來檢驗策略有沒有比亂選好", seed=0)
-def s_random(H, t, P):
+@strategy("qp_nb", "電選隔壁", "四版1", "電腦隨機選號後改買每個號碼的隔壁號（+1）", seed=0)
+def s_qp_nb(H, t, P, k):
     r = random.Random(t * 7919 + P["seed"])
-    return {n: r.random() for n in NUMS}
+    return [n % 80 + 1 for n in r.sample(range(1, 81), k)]
+
+
+@strategy("random", "電選(隨機)", "對照組", "純隨機＝電腦選號，用來比較策略有沒有比亂選好", seed=1)
+def s_random(H, t, P, k):
+    return random.Random(t * 7919 + P["seed"]).sample(range(1, 81), k)
 
 
 def rank01(sc) -> dict:
@@ -437,37 +528,120 @@ def rank01(sc) -> dict:
     return out
 
 
-MIX_DEFAULT = {"hot": 1, "repeat": 1, "drag": 1, "neighbor": 0.5, "cold": 0.5, "tail": 0.5, "zone": 0.5}
+MIX_DEFAULT = {"repeat": 1, "hot": 1, "neighbor": 0.5, "tail": 0.5, "cold": 0.5}
 
 
-@strategy("mix", "綜合加權", "各策略排名加權投票（--weights 調權重）", weights=dict(MIX_DEFAULT))
-def s_mix(H, t, P):
+@strategy("mix", "綜合加權", "整合", "各策略排名加權投票（--weights 調整）", weights=dict(MIX_DEFAULT))
+def s_mix(H, t, P, k):
     tot = Counter()
     for key, w in P["weights"].items():
-        if w:
-            st = STRATS[key]
-            for n, r in rank01(st.fn(H, t, st.params)).items():
-                tot[n] += w * r
+        if not w:
+            continue
+        st = STRATS[key]
+        res = st.fn(H, t, st.params, k)
+        if res is None:
+            continue
+        if isinstance(res, list):
+            res = {n: len(res) - i for i, n in enumerate(res)}
+        for n, r in rank01(res).items():
+            tot[n] += w * r
     return tot
 
 
-def pick(H: Hist, t: int, key: str, k: int) -> list:
-    """用第 t 期以前的資料，依策略選 k 個號碼"""
+@strategy("super", "超級獎號", "三版1~7",
+          "近 N 期超級獎號：排除上期與±near、距離>max_dist；依近3期大小平衡選邊；有重複開過的優先，沒有就挑沒開過的",
+          N=45, near=2, max_dist=45)
+def s_super(H, t, P, k):
+    sup = [(i, H.draws[i].super_no) for i in range(max(0, t - P["N"]), t) if H.draws[i].super_no]
+    if not sup:
+        return None
+    last = sup[-1][1]
+    cnt, seen_at = Counter(s for _, s in sup), {s: i for i, s in sup}
+    r3 = [s for _, s in sup[-3:]]
+    want_big = sum(s >= 41 for s in r3) * 2 < len(r3)  # 近 3 期大號少 → 選大（恰恰／平衡）
+    ok = [n for n in NUMS if P["near"] < abs(n - last) <= P["max_dist"] and (n >= 41) == want_big]
+    first = [n for n in ok if cnt[n] >= 2] or [n for n in ok if cnt[n] == 0]
+    first.sort(key=lambda n: (-cnt[n], -seen_at.get(n, -1), n))
+    rest = sorted((n for n in ok if n not in first), key=lambda n: (-cnt[n], n))
+    return first + rest
+
+
+def pick(H: Hist, t: int, key: str, k: int):
+    """用第 t 期以前的資料，依策略選 k 個號碼；條件不成立回傳 None"""
     st = STRATS[key]
-    sc, rec = st.fn(H, t, st.params), H.freq(t, 10)
-    return sorted(NUMS, key=lambda n: (-sc.get(n, 0), -rec[n], n))[:k]
+    res = st.fn(H, t, st.params, k)
+    if res is None:
+        return None
+    rec = H.freq(t, 10)
+    if isinstance(res, list):
+        out = list(dict.fromkeys(res))[:k]
+        if len(out) < k:
+            out += [n for n in sorted(NUMS, key=lambda n: (-rec[n], n)) if n not in out][:k - len(out)]
+        return out
+    return sorted(NUMS, key=lambda n: (-res.get(n, 0), -rec[n], n))[:k]
+
+
+# ───────────── 猜大小（一版5、二版大小選） ─────────────
+def bs_signal(H: Hist, t: int, bal_win=24, bal_th=0.52, hot_n=20) -> dict:
+    votes = []
+    last = next((H.bs[i] for i in range(t - 1, max(-1, t - 400), -1) if H.bs[i] != "－"), None)
+    if last:  # 二版大小1：小之後會接大（大之後接小為對稱推論）
+        votes.append(("小後接大", "大" if last == "小" else "小"))
+    nums = list(chain.from_iterable(H.sets[max(0, t - bal_win):t]))
+    if nums:  # 一版5：近 2 小時小號特別多 → 下一小時開大（平衡原則）
+        sm = sum(n <= 40 for n in nums) / len(nums)
+        if sm >= bal_th:
+            votes.append(("2小時平衡", "大"))
+        elif sm <= 1 - bal_th:
+            votes.append(("2小時平衡", "小"))
+    c = H.freq(t, hot_n)  # 二版大小2：熱門前十的大小組成
+    b = sum(n >= 41 for n in sorted(NUMS, key=lambda n: (-c[n], n))[:10])
+    if b != 5:
+        votes.append(("前十熱號", "大" if b > 5 else "小"))
+    pb = sum(n >= 41 for n in H.sets[t - 1])  # 二版6：前一期開大 → 下期偏小
+    if pb != 10:
+        votes.append(("上期反向", "小" if pb > 10 else "大"))
+    nb = sum(v == "大" for _, v in votes)
+    ns = len(votes) - nb
+    direction = "大" if nb > ns else "小" if ns > nb else (votes[0][1] if votes else "－")
+    drought = 0
+    for i in range(t - 1, -1, -1):
+        if H.bs[i] != "－":
+            break
+        drought += 1
+    slot = H.same_slot(t)
+    return {"dir": direction, "votes": votes, "drought": drought, "slot": slot,
+            "slot_ok": not slot or any(x != "－" for x in slot)}
 
 
 # ───────────── 機率 / 期望值 ─────────────
-def hyper(k: int, h: int) -> float:
-    """選 k 個號碼、80 取 20，剛好中 h 個的機率"""
-    return math.comb(20, h) * math.comb(60, k - h) / math.comb(80, k)
+def hg(N: int, K: int, n: int, x: int) -> float:
+    """超幾何：N 個裡有 K 個中，抽 n 個剛好中 x 個的機率"""
+    if x < 0 or x > n or x > K or n - x > N - K:
+        return 0.0
+    return math.comb(K, x) * math.comb(N - K, n - x) / math.comb(N, n)
 
 
 def theory(k: int):
-    pwin = sum(hyper(k, h) for h in PAYOUT[k])
-    ev = sum(hyper(k, h) * v for h, v in PAYOUT[k].items()) / BET
+    """k 星：中獎率、回收率"""
+    pwin = sum(hg(80, 20, k, h) for h in PAYOUT[k])
+    ev = sum(hg(80, 20, k, h) * v for h, v in PAYOUT[k].items()) / BET
     return pwin, ev
+
+
+P_BIG = sum(hg(80, 40, 20, x) for x in range(13, 21))  # 單期開「大」的機率（開「小」相同）
+
+
+def p_tail_ge5() -> float:
+    """單期有某個尾數一次開 ≥5 顆的機率"""
+    poly, term = [1], [math.comb(8, j) for j in range(5)]
+    for _ in range(10):
+        new = [0] * (len(poly) + 4)
+        for i, a in enumerate(poly):
+            for j, b in enumerate(term):
+                new[i + j] += a * b
+        poly = new
+    return 1 - poly[20] / math.comb(80, 20)
 
 
 # ───────────── 輸出工具 ─────────────
@@ -487,8 +661,13 @@ def rpad(s: str, w: int) -> str:
     return " " * max(0, w - _w(s)) + s
 
 
+def mean(xs) -> float:
+    xs = list(xs)
+    return sum(xs) / len(xs) if xs else float("nan")
+
+
 # ───────────── 指令 ─────────────
-DEFAULT_KEYS = ["hot", "cold", "repeat", "drag", "neighbor", "tail", "zone", "mix"]
+DEFAULT_KEYS = ["repeat", "hot", "direct", "tail", "combo", "outside", "neighbor", "cold", "qp_nb", "mix"]
 
 
 def parse_keys(s: str, default: list) -> list:
@@ -511,11 +690,11 @@ def apply_overrides(a):
 
 def load_hist(db: str) -> Hist:
     if not os.path.exists(db):
-        sys.exit(f"找不到 {db}\n請先執行：python bingo_strategy.py fetch --days 7（或 import / demo）")
+        sys.exit(f"找不到 {db}\n請先執行：python bingo_strategy.py fetch --days 14（或 import / demo）")
     draws = load_history(db)
     if len(draws) < 100:
         print(f"注意：只有 {len(draws)} 期資料，建議至少 2 天以上（每天 203 期）")
-    if len(draws) < 2:
+    if len(draws) < 3:
         sys.exit("資料不足")
     return Hist(draws)
 
@@ -565,36 +744,41 @@ def cmd_import(a):
     print(f"匯入 {len(new)} 期 → {a.db}：共 {len(allr)} 期")
 
 
+def cmd_list(a):
+    for s in STRATS.values():
+        ps = "，".join(f"{k}={v}" for k, v in s.params.items() if k != "weights")
+        print(f"{pad(s.key, 9)}{pad(s.name, 14)}[{s.src}] {s.desc}" + (f"（參數 {ps}）" if ps else ""))
+
+
 def cmd_stats(a):
     if getattr(a, "fetch", False):
         quick_fetch(a.db)
     H = load_hist(a.db)
-    N, t, last, prev = a.window, H.T, H.draws[-1], H.draws[-2]
+    N, t, last = a.window, H.T, H.draws[-1]
     print(f"資料 {H.T} 期：{H.draws[0].term}（{H.draws[0].date}）~ {last.term}（{last.date}）")
     print(f"最新一期 {last.term}：{fmt(sorted(last.nums))}")
-    print(f"  超級獎號 {last.super_no:02d}｜猜大小 {big_small(last)}｜猜單雙 {odd_even(last)}")
-    rep = sorted(last.s & prev.s)
-    print(f"  連莊（與上期重複）{len(rep)} 個：{fmt(rep)}")
-    reps = [len(H.sets[i] & H.sets[i - 1]) for i in range(max(1, t - N), t)]
-    print(f"  近 {len(reps)} 期平均連莊 {sum(reps) / len(reps):.2f} 個（理論 5.00）")
+    rep = sorted(last.s & H.sets[-2])
+    print(f"  與前期重複 {len(rep)} 顆：{fmt(rep)}（一版：通常 3~5 顆；<2 顆觸發直攻）")
+    st = H.streaks(t)
+    multi = sorted((n for n in st if st[n] >= 2), key=lambda n: (-st[n], n))
+    print("  連莊中：" + ("  ".join(f"{n:02d}(連{st[n]})" for n in multi) or "無"))
+    big = sum(n >= 41 for n in last.nums)
+    print(f"  大號 {big} 顆／小號 {20 - big} 顆｜猜大小 {H.bs[-1]}｜猜單雙 {odd_even(last)}｜超級獎號 {last.super_no:02d}")
     c, g = H.freq(t, N), H.gaps(t)
-    print(f"\n近 {N} 期熱號（理論每號 {N / 4:.1f} 次）：")
-    print("  " + "  ".join(f"{n:02d}({c[n]})" for n in sorted(NUMS, key=lambda n: (-c[n], n))[:12]))
-    print(f"近 {N} 期最少：")
-    print("  " + "  ".join(f"{n:02d}({c[n]})" for n in sorted(NUMS, key=lambda n: (c[n], n))[:12]))
-    print("遺漏最久（冷號，括號＝幾期沒開）：")
-    print("  " + "  ".join(f"{n:02d}({g[n]})" for n in sorted(NUMS, key=lambda n: (-g[n], n))[:12]))
-    tail, zone = Counter(), Counter()
+    print(f"\n近 {N} 期熱門前十（理論每號 {N / 4:.1f} 次）：")
+    print("  " + "  ".join(f"{n:02d}({c[n]})" for n in sorted(NUMS, key=lambda n: (-c[n], n))[:10]))
+    cold = sorted((n for n in NUMS if g[n] >= 10), key=lambda n: (-g[n], n))
+    print("10 期以上未開（括號＝幾期沒開）：")
+    print("  " + ("  ".join(f"{n:02d}({g[n]})" for n in cold) or "無"))
+    r5 = H.freq(t, 5)
+    tail = Counter({d: 0 for d in range(10)})
     for n in NUMS:
-        tail[n % 10] += c[n]
-        zone[(n - 1) // 10] += c[n]
-    print(f"近 {N} 期尾數（理論 {N * 2}）：" + "  ".join(f"{d}尾({v})" for d, v in tail.most_common()))
-    print(f"近 {N} 期區間（理論 {N * 2.5:.0f}）：" + "  ".join(f"{z * 10 + 1:02d}-{z * 10 + 10:02d}({v})" for z, v in zone.most_common()))
-    print(f"近 20 期猜大小：{''.join(big_small(d) for d in H.draws[-20:])}")
+        tail[n % 10] += r5[n]
+    print("近 5 期尾數（由冷到熱）：" + "  ".join(f"{d}尾({v})" for d, v in sorted(tail.items(), key=lambda x: (x[1], x[0]))))
+    drought = next((i for i, r in enumerate(reversed(H.bs)) if r != "－"), H.T)
+    print(f"\n近 20 期猜大小：{''.join(H.bs[-20:])}（已連續 {drought} 期沒開大小）")
     print(f"近 20 期猜單雙：{''.join(odd_even(d) for d in H.draws[-20:])}")
-    sc = Counter(d.super_no for d in H.draws[-400:] if d.super_no)
-    if sc:
-        print(f"近 {min(400, H.T)} 期超級獎號熱號：" + "  ".join(f"{n:02d}({v})" for n, v in sc.most_common(10)))
+    print(f"近 10 期超級獎號：{fmt(d.super_no for d in H.draws[-10:])}")
 
 
 def cmd_pick(a):
@@ -603,11 +787,38 @@ def cmd_pick(a):
     H = load_hist(a.db)
     apply_overrides(a)
     keys, k, t, last = parse_keys(a.strategy, DEFAULT_KEYS), a.stars, H.T, H.draws[-1]
-    print(f"資料 {H.T} 期｜最新 {last.term}（{last.date}）")
-    print(f"下一期 {last.term + 1}｜{k} 星選號：")
+    rep = H.rep_count(t)
+    print(f"資料 {H.T} 期｜最新 {last.term}（{last.date}）｜上期與前期重複 {rep} 顆")
+    print(f"\n下一期 {last.term + 1}｜{k} 星選號")
     for key in keys:
-        print(f"  {pad(STRATS[key].name, 14)}{fmt(sorted(pick(H, t, key, k)))}")
-    print(f"  {pad('超級獎號', 14)}{pick(H, t, 'super', 1)[0]:02d}")
+        st = STRATS[key]
+        label = pad(f"{st.name}（{st.src}）", 38)
+        ps = pick(H, t, key, k)
+        if ps is None:
+            need = f"<{st.params['max_rep'] + 1}" if key == "direct" else f"≥{st.params.get('min_rep', 0)}"
+            print(f"  {label}這期不下注（上期重複 {rep} 顆，條件 {need} 顆）")
+            continue
+        extra = ""
+        if key == "tail":
+            extra = f"  ← {'、'.join(str(d) for d in dict.fromkeys(n % 10 for n in ps))} 尾"
+        elif key == "qp_nb":
+            extra = f"  ← 電選 {fmt(sorted((n - 2) % 80 + 1 for n in ps))} 的隔壁，兩組一起追"
+        print(f"  {label}{fmt(sorted(ps))}{extra}")
+
+    sp = pick(H, t, "super", 2)
+    if sp:
+        print(f"\n超級獎號（三版）：{fmt(sp)}  → 2~3 倍連追 3 期")
+        print(f"  近 5 期 {fmt(d.super_no for d in H.draws[-5:])}；已排除上期 {last.super_no:02d}、±2、距離>45；"
+              f"選{'大' if sp[0] >= 41 else '小'}號邊")
+        print(f"  順便丟三星（三版8）：{fmt(sorted(pick(H, t, 'super', 3)))}")
+    sig = bs_signal(H, t)
+    votes = "、".join(f"{n}→{v}" for n, v in sig["votes"])
+    slot = "".join(sig["slot"]) or "無資料"
+    go = sig["drought"] >= 15 and sig["slot_ok"]
+    print(f"\n猜大小（一版5、二版）：傾向「{sig['dir']}」（{votes}）")
+    print(f"  已連續 {sig['drought']} 期沒開大小｜近 7 天同時段：{slot}｜"
+          + ("可進場：6 倍追 4 期" if go else "觀望（要 15 期以上沒開、且同時段本週有開過大小）"))
+    print("\n追號參考（一版）：3星4倍追5~8期、4星3倍追8期（成本600）、1星10倍追4期（成本1000）→ 實測見 plan 指令")
 
 
 def cmd_backtest(a):
@@ -621,40 +832,230 @@ def cmd_backtest(a):
         sys.exit(f"資料不足：至少要 {a.warmup + 1} 期")
     print(f"回測 {k} 星：{H.draws[t0].term} ~ {H.draws[-1].term}，共 {n} 期（每期只用之前的資料選號）")
     dist = {key: Counter() for key in keys}
-    sup_keys = ["super", "hot", "cold", "random"]
-    sup_hit = Counter()
-    sup_n = 0
+    sup, sup_n, bs_ok, bs_n = Counter(), 0, 0, 0
     for t in range(t0, H.T):
         for key in keys:
-            dist[key][len(H.sets[t].intersection(pick(H, t, key, k)))] += 1
-        if H.draws[t].super_no:
+            ps = pick(H, t, key, k)
+            if ps is not None:
+                dist[key][len(H.sets[t].intersection(ps))] += 1
+        sn = H.draws[t].super_no
+        if sn:
             sup_n += 1
-            for key in sup_keys:
-                sup_hit[key] += pick(H, t, key, 1)[0] == H.draws[t].super_no
-    exp_mean = k / 4
-    se = math.sqrt(k * 0.25 * 0.75 * (80 - k) / 79 / n)
+            for key in ("super", "random"):
+                ps = pick(H, t, key, 2)
+                sup[key] += bool(ps) and sn in ps
+        if H.bs[t] != "－":
+            d = bs_signal(H, t)["dir"]
+            if d != "－":
+                bs_n += 1
+                bs_ok += d == H.bs[t]
+    var1 = k * 0.25 * 0.75 * (80 - k) / 79
     pwin, ev = theory(k)
-    print("\n" + pad("策略", 14) + rpad("平均中", 7) + rpad("z值", 7) + rpad("中獎率", 8) + rpad("回收率", 8) + "   中獎分布（中幾個:期數）")
-    print(f"{pad('理論(隨機)', 14)}{exp_mean:>7.3f}{0:>7.2f}{pwin:>8.1%}{ev:>8.1%}")
+    print("\n" + pad("策略", 14) + rpad("下注期", 7) + rpad("平均中", 8) + rpad("z值", 7)
+          + rpad("中獎率", 8) + rpad("回收率", 8) + "   中獎分布（中幾個:期數）")
+    print(pad("理論(隨機)", 14) + rpad("", 7) + f"{k / 4:>8.3f}{0:>7.2f}{pwin:>8.1%}{ev:>8.1%}")
     for key in keys:
         d = dist[key]
-        mean = sum(h * c for h, c in d.items()) / n
-        win = sum(c for h, c in d.items() if h in PAYOUT[k]) / n
-        roi = sum(PAYOUT[k].get(h, 0) * c for h, c in d.items()) / (BET * n)
-        spread = " ".join(f"{h}:{d[h]}" for h in sorted(d))
-        print(f"{pad(STRATS[key].name, 14)}{mean:>7.3f}{(mean - exp_mean) / se:>7.2f}{win:>8.1%}{roi:>8.1%}   {spread}")
+        m = sum(d.values())
+        if not m:
+            print(pad(STRATS[key].name, 14) + rpad("0", 7) + "   （期間內沒觸發）")
+            continue
+        avg = sum(h * c for h, c in d.items()) / m
+        win = sum(c for h, c in d.items() if h in PAYOUT[k]) / m
+        roi = sum(PAYOUT[k].get(h, 0) * c for h, c in d.items()) / (BET * m)
+        z = (avg - k / 4) / math.sqrt(var1 / m)
+        print(pad(STRATS[key].name, 14) + f"{m:>7}{avg:>8.3f}{z:>7.2f}{win:>8.1%}{roi:>8.1%}   "
+              + " ".join(f"{h}:{d[h]}" for h in sorted(d)))
     if sup_n:
-        print(f"\n超級獎號（{sup_n} 期，理論命中 1.25%、回收率 {SUPER_PAYOUT / BET / 80:.0%}）：")
-        for key in sup_keys:
-            r = sup_hit[key] / sup_n
-            print(f"  {pad(STRATS[key].name, 14)}命中 {r:.2%}  回收率 {r * SUPER_PAYOUT / BET:.0%}")
-    print("\nz 值：|z| < 2 代表跟隨機沒有顯著差異；回收率 = 獎金 ÷ 投注金額（未含加碼）")
+        print(f"\n超級獎號 2 碼（{sup_n} 期）：三版策略命中 {sup['super'] / sup_n:.2%}｜電選 {sup['random'] / sup_n:.2%}"
+              f"｜理論 2.50%（回收率 {SUPER_PAYOUT / BET / 80:.0%}）")
+    if bs_n:
+        print(f"猜大小方向（{bs_n} 期有開大小）：猜中 {bs_ok / bs_n:.1%}｜理論 50.0%")
+    print("\nz 值：|z| < 2 ＝ 跟電選（隨機）沒有顯著差異；回收率 ＝ 獎金 ÷ 投注金額（未含加碼）")
+
+
+PLANS = [  # (方案, 出處, 類型, 星數/碼數, 倍數, 期數)
+    ("3星4倍 追5期", "一版", "num", 3, 4, 5),
+    ("3星4倍 追8期", "一版", "num", 3, 4, 8),
+    ("3星4倍 追10期(傳說)", "一版", "num", 3, 4, 10),
+    ("4星3倍 追8期", "一版", "num", 4, 3, 8),
+    ("1星10倍 追4期", "一版", "num", 1, 10, 4),
+    ("2星10倍 追4期", "四版9", "num", 2, 10, 4),
+    ("3星2倍 非上期熱門", "四版6", "outside", 3, 2, 1),
+    ("超級獎號2碼 2倍 追3期", "三版6", "super", 2, 2, 3),
+    ("猜大小6倍 追4期", "二版大小4、6", "bs", 1, 6, 4),
+]
+
+
+def run_plan(H, kind, key, k, mult, periods, t0, stop):
+    out, t, rnd = [], t0, random.Random(7)
+    while t + periods <= H.T:
+        if kind == "bs":
+            sig = bs_signal(H, t)
+            target = rnd.choice("大小") if key == "random" else sig["dir"]
+            if sig["drought"] < 15 or not sig["slot_ok"] or target == "－":
+                t += 1
+                continue
+        else:
+            ps = pick(H, t, key, k)
+            if ps is None:
+                t += 1
+                continue
+            ps = set(ps)
+        cost = pay = wins = 0
+        for j in range(periods):
+            i = t + j
+            if kind == "bs":
+                p, c = (BS_PAYOUT if H.bs[i] == target else 0), BET
+            elif kind == "super":
+                p, c = (SUPER_PAYOUT if H.draws[i].super_no in ps else 0), BET * len(ps)
+            else:
+                p, c = PAYOUT[k].get(len(H.sets[i] & ps), 0), BET
+            cost += c * mult
+            pay += p * mult
+            wins += p > 0
+            if stop and p > 0:
+                break
+        out.append((cost, pay, wins))
+        t += j + 1
+    return out
+
+
+def cmd_plan(a):
+    H = load_hist(a.db)
+    apply_overrides(a)
+    keys = parse_keys(a.strategy, ["mix", "random"])
+    t0 = max(a.warmup, H.T - a.last)
+    print(f"追號方案回測：{H.draws[t0].term} ~ {H.draws[-1].term}（{H.T - t0} 期）｜"
+          + ("中了就停" if a.stop else "每期都買滿") + "｜一輪結束才開下一輪")
+    print("\n" + pad("方案（出處）", 34) + pad("選號", 14) + rpad("輪數", 6) + rpad("至少中1次", 11)
+          + rpad("賺錢輪", 8) + rpad("平均成本", 10) + rpad("平均獎金", 10) + rpad("回收率", 8))
+    for name, src, kind, k, mult, periods in PLANS:
+        if kind == "num":
+            ks, pwin, roi = keys, theory(k)[0], theory(k)[1]
+        elif kind == "outside":
+            ks, pwin, roi = ["outside", "random"], theory(k)[0], theory(k)[1]
+        elif kind == "super":
+            ks, pwin, roi = ["super", "random"], k / 80, SUPER_PAYOUT / BET / 80
+        else:
+            ks, pwin, roi = ["bs", "random"], P_BIG, BS_PAYOUT / BET * P_BIG
+        title = f"{name}（{src}）"
+        for key in ks:
+            res = run_plan(H, kind, key, k, mult, periods, t0, a.stop)
+            label = "貼文訊號" if key == "bs" else STRATS[key].name
+            if not res:
+                print(pad(title, 34) + pad(label, 14) + rpad("0", 6))
+            else:
+                cost, pay = sum(r[0] for r in res), sum(r[1] for r in res)
+                print(pad(title, 34) + pad(label, 14) + f"{len(res):>6}"
+                      + f"{mean(r[2] > 0 for r in res):>11.1%}{mean(r[1] > r[0] for r in res):>8.1%}"
+                      + f"{cost / len(res):>10.0f}{pay / len(res):>10.0f}{pay / cost:>8.1%}")
+            title = ""
+        print(pad("", 34) + pad("理論值", 14) + rpad("", 6) + f"{1 - (1 - pwin) ** periods:>11.1%}"
+              + rpad("", 8) + rpad("", 10) + rpad("", 10) + f"{roi:>8.1%}")
+    print("\n回收率 < 100% ＝ 長期會虧；每一注的期望值固定，追幾期、幾倍只改變波動，不改變回收率")
+
+
+def cmd_verify(a):
+    H = load_hist(a.db)
+    T, S, R = H.T, H.sets, H.bs
+    rows = []
+
+    def row(src, claim, real, theo):
+        rows.append((src, claim, real, theo))
+
+    pct = lambda x: f"{x:.1%}"
+    reps = [len(S[i] & S[i - 1]) for i in range(1, T)]
+    row("一版1", "每期會開 3~5 顆上期號碼",
+        f"{mean(3 <= r <= 5 for r in reps):.1%}（平均 {mean(reps):.2f} 顆）",
+        f"{sum(hg(80, 20, 20, x) for x in range(3, 6)):.1%}（平均 5.00 顆）")
+
+    hh = []
+    for i in range(20, T):
+        c = H.freq(i, 20)
+        hh.append(len(S[i].intersection(sorted(NUMS, key=lambda n: (-c[n], n))[:10])))
+    row("一版2", "近 20 期熱門前十，下期約開 3 顆",
+        f"平均 {mean(hh):.2f} 顆，≥3 顆 {mean(h >= 3 for h in hh):.1%}",
+        f"平均 2.50 顆，≥3 顆 {sum(hg(80, 20, 10, x) for x in range(3, 11)):.1%}")
+
+    trig = [i for i in range(20, T) if H.rep_count(i) <= 1]
+    real = (f"觸發 {len(trig)} 次，4 星中獎 {mean(len(S[i].intersection(pick(H, i, 'direct', 4))) >= 2 for i in trig):.1%}"
+            if trig else "期間內沒觸發")
+    row("一版3", "上期重複 <2 顆 → 直攻上期號碼 4 星大部分會中", real, f"4 星中獎 {pct(theory(4)[0])}")
+
+    t5 = [max(Counter(n % 10 for n in s).values()) >= 5 for s in S]
+    row("一版4", "每小時約 5 次某尾數一次開 5~6 顆", f"每小時 {12 * mean(t5):.1f} 次", f"每小時 {12 * p_tail_ge5():.1f} 次")
+
+    small = [sum(n <= 40 for n in s) for s in S]
+    blocks = big_n = tot_n = 0
+    for i in range(24, T - 12, 12):
+        if sum(small[i - 24:i]) / 480 >= 0.52:
+            blocks += 1
+            nxt = [R[j] for j in range(i, i + 12) if R[j] != "－"]
+            big_n += nxt.count("大")
+            tot_n += len(nxt)
+    row("一版5", "近 2 小時小號特別多（≥52%）→ 下一小時開大",
+        f"{blocks} 次，下一小時大小結果「大」佔 {pct(big_n / tot_n) if tot_n else '－'}", "50.0%")
+
+    after_big = [20 - small[i] for i in range(1, T) if 20 - small[i - 1] > 10]
+    row("二版6", "前一期開大（大號 >10 顆）→ 下期偏小", f"下期平均大號 {mean(after_big):.2f} 顆（{len(after_big)} 次）", "10.00 顆")
+
+    cur, cont, base = [0] * 81, Counter(), Counter()
+    for i in range(T - 1):
+        for n in NUMS:
+            cur[n] = cur[n] + 1 if n in S[i] else 0
+        for n in S[i]:
+            base[cur[n]] += 1
+            cont[cur[n]] += n in S[i + 1]
+    row("二版10", "連莊球號通常不超過 4 次（連開 4 次後第 5 次再開）",
+        f"{pct(cont[4] / base[4]) if base[4] else '－'}（{base[4]} 次）", "25.0%")
+
+    seq = [r for r in R if r != "－"]
+    after_small = [y for x, y in zip(seq, seq[1:]) if x == "小"]
+    row("大小1", "開「小」之後，下一次大小結果是「大」",
+        f"{pct(after_small.count('大') / len(after_small)) if after_small else '－'}（{len(after_small)} 次）", "50.0%")
+
+    hit = n15 = run = 0
+    for i in range(T - 2):
+        if run == 15:
+            n15 += 1
+            hit += any(R[j] != "－" for j in range(i, i + 3))
+        run = run + 1 if R[i] == "－" else 0
+    row("大小6", "15 期沒開大小 → 接下來 3 期內會開",
+        f"{pct(hit / n15) if n15 else '－'}（{n15} 次）", pct(1 - (1 - 2 * P_BIG) ** 3))
+
+    sup = [d.super_no for d in H.draws if d.super_no]
+    if len(sup) > 50:
+        pairs = list(zip(sup, sup[1:]))
+        row("三版3", "超級獎號不會連續開同號", f"連開 {mean(x == y for x, y in pairs):.2%}", "連開 1.25%")
+        row("三版4", "超級獎號前後期距離通常不超過 40~50（>45 的比例）",
+            pct(mean(abs(x - y) > 45 for x, y in pairs)), pct(1190 / 6400))
+        row("三版5", "超級獎號不太開在上期隔壁（±1~2）", pct(mean(1 <= abs(x - y) <= 2 for x, y in pairs)), pct(314 / 6400))
+        row("三版2", "超級獎號大小恰恰（連 4 期全大或全小的比例）",
+            pct(mean(all(x >= 41 for x in w) or all(x <= 40 for x in w) for w in zip(sup, sup[1:], sup[2:], sup[3:]))),
+            "12.5%")
+        row("三版2", "用近 3 期大小平衡猜下一期超級獎號大小",
+            f"猜中 {mean((sum(x >= 41 for x in sup[i - 3:i]) * 2 < 3) == (sup[i] >= 41) for i in range(3, len(sup))):.1%}",
+            "50.0%")
+        got = exp = 0.0
+        for i in range(45, len(sup)):
+            cnt = Counter(sup[i - 45:i])
+            cand = {n for n in NUMS if cnt[n] >= 2} or {n for n in NUMS if cnt[n] == 0}
+            got += sup[i] in cand
+            exp += len(cand) / 80
+        row("三版1、7", "近 45 期重複開過的超級獎號較會再開", f"命中 {got:.0f} 次／隨機應中 {exp:.1f} 次（{got / exp:.2f} 倍）", "1.00 倍")
+
+    print(f"用 {T} 期開獎數據檢驗貼文說法（{H.draws[0].term} ~ {H.draws[-1].term}）\n")
+    for src, claim, real, theo in rows:
+        print(f"[{src}] {claim}")
+        print(f"    實際：{real}｜純隨機理論：{theo}")
+    print("\n實際 ≈ 純隨機理論 → 這條說法只是機率本來的樣子，無法用來預測下一期")
 
 
 def cmd_demo(a):
     rnd = random.Random(a.seed)
     path = os.path.join(HERE, "bingo_demo.csv")
-    draws, term, start = [], 115_000_001, date(2026, 9, 26)
+    draws, term, start = [], 115_000_001, date(2026, 9, 24)
     for i in range(a.days):
         ds = (start + timedelta(days=i)).isoformat()
         for _ in range(203):
@@ -663,12 +1064,11 @@ def cmd_demo(a):
             term += 1
     save_db(draws, path)
     print(f"已產生模擬資料 {path}（{len(draws)} 期，純隨機，只用來測程式）\n")
-    a.db, a.fetch, a.window = path, False, 30
-    cmd_stats(a)
-    print()
-    cmd_pick(a)
-    print()
-    cmd_backtest(a)
+    a.db, a.fetch, a.window, a.stop = path, False, 30, False
+    for fn in (cmd_stats, cmd_pick, cmd_backtest, cmd_plan, cmd_verify):
+        print("=" * 30, fn.__name__[4:], "=" * 30)
+        fn(a)
+        print()
 
 
 def main(argv=None):
@@ -679,37 +1079,41 @@ def main(argv=None):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--db", default=DB_PATH, help="開獎資料檔（預設 bingo_history.csv）")
     st = argparse.ArgumentParser(add_help=False)
-    st.add_argument("--stars", "-k", type=int, default=4, choices=range(1, 11), metavar="1~10", help="幾星（預設 4）")
+    st.add_argument("--stars", "-k", type=int, default=3, choices=range(1, 11), metavar="1~10", help="幾星（預設 3）")
     st.add_argument("--strategy", "-s", default="", help="策略代號，逗號分隔：" + ",".join(STRATS))
-    st.add_argument("--set", default="", help="調參數，例：hot.N=50,drag.W=1000")
-    st.add_argument("--weights", default="", help="綜合加權權重，例：hot=2,drag=1,cold=0")
+    st.add_argument("--set", default="", help="調參數，例：hot.N=30,super.N=50")
+    st.add_argument("--weights", default="", help="綜合加權權重，例：repeat=2,hot=1,cold=0")
     st.add_argument("--fetch", action="store_true", help="先抓今天最新開獎再算")
+    rng = argparse.ArgumentParser(add_help=False)
+    rng.add_argument("--last", type=int, default=2000, help="回測最近幾期（預設 2000）")
+    rng.add_argument("--warmup", type=int, default=60, help="前面保留幾期當暖身資料")
 
-    p = argparse.ArgumentParser(description="賓果賓果選號策略程式", epilog=__doc__,
+    p = argparse.ArgumentParser(description="賓果賓果選號策略程式（Threads 攻略一～四版）", epilog=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fetch", parents=[common], help="抓台彩官方開獎資料")
-    f.add_argument("--days", type=int, default=7, help="抓最近幾天（預設 7）")
+    f.add_argument("--days", type=int, default=14, help="抓最近幾天（預設 14）")
     f.add_argument("--start", help="起始日 YYYY-MM-DD")
     f.add_argument("--end", help="結束日 YYYY-MM-DD")
     f.set_defaults(func=cmd_fetch)
     i = sub.add_parser("import", parents=[common], help="匯入 CSV/TXT 開獎資料")
     i.add_argument("file")
     i.set_defaults(func=cmd_import)
-    s = sub.add_parser("stats", parents=[common], help="冷熱號等統計")
-    s.add_argument("--window", "-n", type=int, default=30, help="統計近幾期（預設 30）")
+    sub.add_parser("list", help="列出所有策略與貼文出處").set_defaults(func=cmd_list)
+    s = sub.add_parser("stats", parents=[common], help="盤面統計")
+    s.add_argument("--window", "-n", type=int, default=20, help="熱號統計近幾期（預設 20）")
     s.add_argument("--fetch", action="store_true", help="先抓今天最新開獎")
     s.set_defaults(func=cmd_stats)
-    pk = sub.add_parser("pick", parents=[common, st], help="產生下一期選號")
-    pk.set_defaults(func=cmd_pick)
-    b = sub.add_parser("backtest", parents=[common, st], help="歷史回測")
-    b.add_argument("--last", type=int, default=1000, help="回測最近幾期（預設 1000）")
-    b.add_argument("--warmup", type=int, default=60, help="前面保留幾期當暖身資料")
-    b.set_defaults(func=cmd_backtest)
+    sub.add_parser("pick", parents=[common, st], help="產生下一期選號").set_defaults(func=cmd_pick)
+    sub.add_parser("backtest", parents=[common, st, rng], help="各策略歷史回測").set_defaults(func=cmd_backtest)
+    pl = sub.add_parser("plan", parents=[common, st, rng], help="追號方案回測")
+    pl.add_argument("--stop", action="store_true", help="中了就停（預設每期都買滿）")
+    pl.set_defaults(func=cmd_plan)
+    sub.add_parser("verify", parents=[common], help="用數據檢驗貼文說法").set_defaults(func=cmd_verify)
     d = sub.add_parser("demo", parents=[st], help="用模擬資料跑一遍")
-    d.add_argument("--days", type=int, default=5)
+    d.add_argument("--days", type=int, default=10)
     d.add_argument("--seed", type=int, default=1)
-    d.add_argument("--last", type=int, default=600)
+    d.add_argument("--last", type=int, default=1500)
     d.add_argument("--warmup", type=int, default=60)
     d.set_defaults(func=cmd_demo)
     a = p.parse_args(argv)
