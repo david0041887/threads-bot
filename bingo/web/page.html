@@ -1,0 +1,826 @@
+<title>賓果攻略選號台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+/* 版面：彩券行看板＋台彩 8×10 號碼盤；手機單欄，桌機左盤右號 */
+:root {
+  --bg: #f2f4f8; --surface: #ffffff; --surface-2: #edf0f6; --ink: #182134; --muted: #5b667e; --line: #dce2ec;
+  --accent: #d42a3f; --accent-ink: #ffffff; --accent-soft: #fbe4e7;
+  --gold: #c98a0c; --gold-ink: #3d2a00; --gold-soft: #fbf0d6;
+  --heat: #2f56c9; --good: #0f7a56; --good-soft: #dff3ea; --warn: #9a5c00;
+  --f-num: "Barlow Condensed", "Arial Narrow", "Noto Sans TC", sans-serif;
+  --f-body: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --r: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1320; --surface: #161d2d; --surface-2: #1d2639; --ink: #e6ebf5; --muted: #9aa6be; --line: #283249;
+    --accent: #ff5468; --accent-ink: #1a0509; --accent-soft: #3a1a22; --gold: #f0b43c; --gold-ink: #2a1c00; --gold-soft: #33290f;
+    --heat: #7d97ff; --good: #43c796; --good-soft: #143326; --warn: #e9a447; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1320; --surface: #161d2d; --surface-2: #1d2639; --ink: #e6ebf5; --muted: #9aa6be; --line: #283249;
+  --accent: #ff5468; --accent-ink: #1a0509; --accent-soft: #3a1a22; --gold: #f0b43c; --gold-ink: #2a1c00; --gold-soft: #33290f;
+  --heat: #7d97ff; --good: #43c796; --good-soft: #143326; --warn: #e9a447; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.55; }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 0 40px; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+p { margin: 0; }
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 頂部看板 */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); }
+.top-in { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 10px 0; display: grid; gap: 6px; }
+.brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.brand h1 { font-size: 20px; letter-spacing: .02em; }
+.brand h1 b { color: var(--accent); font-family: var(--f-num); font-size: 24px; letter-spacing: .04em; margin-right: 2px; }
+.meta { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12.5px; border: 1px solid var(--line); background: var(--surface); }
+.chip.promo { background: var(--gold-soft); border-color: transparent; color: var(--ink); }
+.chip.promo b { color: var(--gold); }
+.chip.sample { background: var(--accent-soft); border-color: transparent; }
+.chip.cloud { color: var(--muted); }
+.tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; margin-top: 2px; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: none; border: 0; background: none; padding: 9px 12px 10px; cursor: pointer; color: var(--muted); font-weight: 500; border-bottom: 3px solid transparent; }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+
+/* 共用 */
+section.panel { padding-top: 16px; display: grid; gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; min-width: 0; }
+.card > h2 { font-size: 15px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.card > h2 small { font-weight: 400; color: var(--muted); font-size: 12.5px; }
+.label { font-size: 12px; letter-spacing: .08em; color: var(--muted); }
+.muted { color: var(--muted); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.grid2 { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 880px) { .grid2 { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: start; } }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.seg button { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; min-width: 38px; padding: 5px 9px; cursor: pointer; font-family: var(--f-num); font-size: 17px; font-weight: 600; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.seg.text button { font-family: var(--f-body); font-size: 13.5px; font-weight: 500; }
+.btn { border: 1px solid var(--ink); background: var(--ink); color: var(--bg); border-radius: 8px; padding: 7px 14px; cursor: pointer; font-weight: 500; }
+.btn.ghost { background: var(--surface); color: var(--ink); border-color: var(--line); }
+.btn.danger { background: var(--surface); color: var(--accent); border-color: var(--accent); }
+.btn:disabled { opacity: .5; cursor: default; }
+.pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12.5px; background: var(--surface-2); color: var(--muted); }
+.pill.go { background: var(--good-soft); color: var(--good); font-weight: 500; }
+.pill.hot { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.note { font-size: 12.5px; color: var(--muted); }
+.banner { border-radius: var(--r); padding: 10px 14px; background: var(--accent-soft); font-size: 13.5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+.banner button { white-space: nowrap; }
+
+/* 號碼球 */
+.balls { display: flex; flex-wrap: wrap; gap: 5px; }
+.ball { position: relative; width: 32px; height: 32px; border-radius: 50%; display: inline-grid; place-items: center; font-family: var(--f-num); font-weight: 600; font-size: 17px; font-variant-numeric: tabular-nums; background: var(--surface-2); color: var(--ink); border: 1px solid var(--line); }
+.ball.pick { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.ball.sup { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); }
+.ball.rep { border: 2px solid var(--accent); }
+.ball .st { position: absolute; right: -5px; top: -6px; font-family: var(--f-body); font-size: 9.5px; font-weight: 700; background: var(--accent); color: var(--accent-ink); border-radius: 6px; padding: 0 3px; line-height: 14px; }
+.ball.lg { width: 42px; height: 42px; font-size: 22px; }
+
+/* 策略清單 */
+.strats { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.strat { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+.strat:hover { background: var(--surface-2); }
+.strat[aria-pressed="true"] { background: var(--surface-2); border-color: var(--line); }
+.strat-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.strat-name { font-weight: 700; }
+.src { font-size: 11.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; }
+.strat-note { font-size: 12.5px; color: var(--muted); }
+
+/* 號碼盤 */
+.board { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 4px; }
+.cell { aspect-ratio: 1; max-width: 100%; display: grid; place-items: center; border-radius: 8px; font-family: var(--f-num); font-weight: 600; font-size: clamp(14px, 3.6vw, 18px); font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--heat) calc(var(--h, 0) * 42%), var(--surface)); color: var(--ink); border: 1px solid var(--line); position: relative; }
+.cell.last { box-shadow: inset 0 0 0 2px var(--ink); }
+.cell.pick { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.cell.sup::after { content: ""; position: absolute; inset: 3px; border-radius: 6px; border: 2px solid var(--gold); }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 10px; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; border: 1px solid var(--line); }
+
+/* 大小訊號 */
+.bs-big { font-family: var(--f-num); font-size: 40px; font-weight: 700; line-height: 1; color: var(--accent); }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; font-size: 13.5px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+.slotseq { display: inline-flex; gap: 3px; }
+.slotseq span { width: 20px; height: 20px; border-radius: 5px; display: inline-grid; place-items: center; font-size: 12px; background: var(--surface-2); }
+.slotseq span.on { background: var(--gold-soft); color: var(--gold); font-weight: 700; }
+
+/* 表格 */
+.tbl-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+th, td { padding: 7px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 500; color: var(--muted); font-size: 12.5px; }
+tr.theory td { color: var(--muted); background: var(--surface-2); }
+td.dist { text-align: left; color: var(--muted); font-size: 12px; }
+td .z-hi { color: var(--accent); font-weight: 700; }
+tr.grp td { border-top: 2px solid var(--line); }
+.roi-bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--heat); vertical-align: middle; margin-left: 6px; }
+.roi-bar.over { background: var(--good); }
+
+/* 檢驗 */
+.claims { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 760px) { .claims { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.claim { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--surface); display: grid; gap: 6px; }
+.claim .cmp { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; font-size: 13.5px; }
+.claim .cmp b { font-weight: 500; color: var(--muted); }
+
+/* 資料 */
+textarea, input[type="text"], input[type="number"], input[type="date"], select { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 8px 10px; }
+textarea { min-height: 120px; font-family: var(--f-num); font-size: 15px; }
+.form { display: grid; gap: 10px; }
+.form .two { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.status { font-size: 13px; min-height: 1.4em; }
+.status.err { color: var(--accent); }
+.status.ok { color: var(--good); }
+code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; word-break: break-all; }
+.foot { margin-top: 28px; font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+@media (prefers-reduced-motion: no-preference) { .strat, .tab, .seg button { transition: background-color .15s, color .15s, border-color .15s; } }
+</style>
+
+<header class="top">
+  <div class="top-in">
+    <div class="brand"><h1><b>BINGO</b>攻略選號台</h1><span class="meta" id="meta"></span></div>
+    <div class="chips" id="chips"></div>
+    <nav class="tabs" role="tablist" aria-label="功能">
+      <button class="tab" role="tab" id="t-pick" data-tab="pick">選號</button>
+      <button class="tab" role="tab" id="t-bt" data-tab="bt">回測</button>
+      <button class="tab" role="tab" id="t-plan" data-tab="plan">追號方案</button>
+      <button class="tab" role="tab" id="t-verify" data-tab="verify">說法檢驗</button>
+      <button class="tab" role="tab" id="t-ev" data-tab="ev">回收率</button>
+      <button class="tab" role="tab" id="t-data" data-tab="data">開獎資料</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="sample-banner" class="banner" hidden style="margin-top:14px">
+    <span>目前是<b>範例資料</b>（隨機模擬，不是真實開獎）。匯入台彩開獎資料後，選號才有意義。</span>
+    <button class="btn" type="button" data-go="data">匯入開獎資料</button>
+  </div>
+
+  <!-- 選號 -->
+  <section class="panel" id="p-pick" role="tabpanel" aria-labelledby="t-pick">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div class="label">下一期</div>
+          <div style="font-family:var(--f-num);font-size:30px;font-weight:700;line-height:1.1" id="next-term"></div>
+          <div class="note" id="next-when"></div>
+        </div>
+        <div style="display:grid;gap:6px;justify-items:start">
+          <span class="label">星數（選幾個號碼）</span>
+          <div class="seg" id="stars"></div>
+        </div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div style="display:grid;gap:16px;min-width:0">
+        <div class="card">
+          <h2>各策略選號 <small>點一列可在號碼盤上標出</small></h2>
+          <ul class="strats" id="strats"></ul>
+        </div>
+      </div>
+      <div style="display:grid;gap:16px;min-width:0">
+        <div class="card">
+          <h2>號碼盤 <small id="board-sub"></small></h2>
+          <div class="board" id="board"></div>
+          <div class="legend">
+            <span><i style="background:color-mix(in srgb,var(--heat) 42%,var(--surface))"></i>近 20 期開得多</span>
+            <span><i style="box-shadow:inset 0 0 0 2px var(--ink)"></i>上期開出</span>
+            <span><i style="background:var(--accent);border-color:var(--accent)"></i>選中的策略</span>
+            <span><i style="border:2px solid var(--gold)"></i>超級獎號候選</span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>超級獎號 <small>三版：縮到 2 碼，2~3 倍連追 3 期</small></h2>
+          <div class="row" id="sup-balls"></div>
+          <dl class="kv" id="sup-info" style="margin-top:10px"></dl>
+        </div>
+        <div class="card">
+          <h2>猜大小 <small>一版5、二版大小選</small></h2>
+          <div class="row" style="gap:14px;align-items:center">
+            <div class="bs-big" id="bs-dir"></div>
+            <div id="bs-advice"></div>
+          </div>
+          <dl class="kv" id="bs-info" style="margin-top:10px"></dl>
+        </div>
+        <div class="card">
+          <h2>上一期 <small id="last-sub"></small></h2>
+          <div class="balls" id="last-balls"></div>
+          <dl class="kv" id="last-info" style="margin-top:10px"></dl>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 回測 -->
+  <section class="panel" id="p-bt" role="tabpanel" aria-labelledby="t-bt" hidden>
+    <div class="card">
+      <div class="form">
+        <div class="row" style="gap:14px">
+          <div style="display:grid;gap:6px"><span class="label">星數</span><div class="seg" id="stars2"></div></div>
+          <div style="display:grid;gap:6px"><span class="label">回測期數</span><div class="seg text" id="bt-last"></div></div>
+          <div style="display:grid;gap:6px"><span class="label">獎金</span><div class="seg text bonus-seg"></div></div>
+        </div>
+        <p class="note">每一期只用「那一期以前」的資料選號，再跟實際開獎對答案。z 值絕對值小於 2 ＝ 跟電選（隨機）沒有顯著差異。</p>
+      </div>
+    </div>
+    <div class="card"><div id="bt-out" class="tbl-wrap"></div></div>
+  </section>
+
+  <!-- 追號方案 -->
+  <section class="panel" id="p-plan" role="tabpanel" aria-labelledby="t-plan" hidden>
+    <div class="card">
+      <div class="form">
+        <div class="row" style="gap:14px">
+          <div style="display:grid;gap:6px;min-width:180px"><label class="label" for="plan-key">號碼方案用的選號策略</label><select id="plan-key"></select></div>
+          <div style="display:grid;gap:6px"><span class="label">買法</span><div class="seg text" id="plan-stop"></div></div>
+          <div style="display:grid;gap:6px"><span class="label">獎金</span><div class="seg text bonus-seg"></div></div>
+        </div>
+        <p class="note">照貼文的倍數與期數，把同一組號碼連續買下去；一輪結束才開始下一輪。猜大小只在「15 期以上沒開大小、且本週同時段開過」時進場。</p>
+      </div>
+    </div>
+    <div class="card"><div id="plan-out" class="tbl-wrap"></div></div>
+  </section>
+
+  <!-- 說法檢驗 -->
+  <section class="panel" id="p-verify" role="tabpanel" aria-labelledby="t-verify" hidden>
+    <div class="card"><p class="note" id="verify-sub"></p></div>
+    <div class="claims" id="verify-out"></div>
+  </section>
+
+  <!-- 回收率 -->
+  <section class="panel" id="p-ev" role="tabpanel" aria-labelledby="t-ev" hidden>
+    <div class="card">
+      <h2>各玩法中獎率與回收率 <small>回收率＝長期平均每投 100 元拿回多少</small></h2>
+      <div class="tbl-wrap" id="ev-stars"></div>
+    </div>
+    <div class="card">
+      <h2>貼文追號方案 <small>每期都買滿</small></h2>
+      <div class="tbl-wrap" id="ev-chase"></div>
+    </div>
+    <div class="card"><div id="ev-promo" class="note"></div></div>
+  </section>
+
+  <!-- 開獎資料 -->
+  <section class="panel" id="p-data" role="tabpanel" aria-labelledby="t-data" hidden>
+    <div class="card" id="server-card" hidden>
+      <h2>自動更新 <small>伺服器每分鐘抓台彩開獎</small></h2>
+      <dl class="kv" id="server-info"></dl>
+      <div class="row" style="margin-top:10px"><button class="btn" type="button" id="server-refresh">立即更新</button><span class="status" id="server-status"></span></div>
+    </div>
+    <div class="card">
+      <h2>目前資料</h2>
+      <dl class="kv" id="data-info"></dl>
+      <p class="status" id="cloud-status" style="margin-top:8px"></p>
+      <div class="row" style="margin-top:8px">
+        <button class="btn ghost" type="button" id="push-local" hidden>把這台裝置的資料上傳到雲端</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>新增一期 <small>看完開獎直接輸入</small></h2>
+      <form class="form" id="quick-form">
+        <div><label class="label" for="q-nums">20 個獎號（空白或逗號分隔）</label><input type="text" id="q-nums" inputmode="numeric" autocomplete="off" placeholder="例：03 08 11 15 19 22 27 30 34 38 41 45 49 52 58 61 66 70 74 79"></div>
+        <div class="two">
+          <div><label class="label" for="q-sup">超級獎號（第 20 個開出）</label><input type="number" id="q-sup" min="1" max="80" inputmode="numeric"></div>
+          <div><label class="label" for="q-term">期別（空白＝接在最後一期後）</label><input type="number" id="q-term" inputmode="numeric"></div>
+          <div><label class="label" for="q-date">開獎日期</label><input type="date" id="q-date"></div>
+        </div>
+        <div class="row"><button class="btn" type="submit">新增這一期</button><span class="status" id="q-status"></span></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>貼上或上傳開獎資料</h2>
+      <div class="form">
+        <label class="label" for="paste">每一列：期別＋20 個號碼（可含日期、超級獎號），也可以直接貼 CSV</label>
+        <textarea id="paste" spellcheck="false" placeholder="115058001 2026/10/03 05 12 18 22 27 31 33 40 41 45 48 52 57 60 63 66 70 74 77 80"></textarea>
+        <div class="row">
+          <button class="btn" type="button" id="paste-go">匯入貼上的資料</button>
+          <label class="btn ghost" for="file">上傳 CSV／TXT 檔</label>
+          <input type="file" id="file" accept=".csv,.txt,text/csv,text/plain" hidden>
+        </div>
+        <p class="status" id="paste-status"></p>
+        <p class="note" id="py-hint">電腦上用 Python 版抓最新資料：<code>python bingo_strategy.py fetch --days 14</code>，再把產生的 <code>bingo_history.csv</code> 上傳到這裡。上傳後會存到雲端，手機打開這個頁面就看得到。</p>
+      </div>
+    </div>
+    <div class="card">
+      <h2>清除資料</h2>
+      <div class="row">
+        <button class="btn danger" type="button" id="clear-local">清除這台裝置的資料</button>
+        <button class="btn danger" type="button" id="clear-cloud" hidden>清除雲端資料</button>
+        <span class="status" id="clear-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p>加碼金額依新聞報導整理（2026 中秋：9/25–10/11 超級獎號 1,500、猜大小／單雙 175；10/8–10/9 基本玩法 1～6 星加碼），實際以台彩公告為準。</p>
+    <p>策略出處：Threads 賓果攻略一～四版。每期開獎互相獨立，回測與說法檢驗用來對照實際數據。</p>
+  </footer>
+</main>
+
+<script>
+/*__CORE__*/
+</script>
+<script>
+(function () {
+  "use strict";
+  const B = window.Bingo;
+  const MODE = window.BINGO_MODE === "server" ? "server" : "artifact";
+  const $ = (s) => document.querySelector(s);
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
+  const p2 = B.pad2;
+  const pct = (x, d = 1) => (isFinite(x) ? (x * 100).toFixed(d) + "%" : "－");
+  const money = (x) => Math.round(x).toLocaleString("zh-TW");
+  const LS = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 無法儲存時略過 */ } },
+    raw(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    setRaw(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } },
+    del(k) { try { localStorage.removeItem(k); } catch (e) { /* 略過 */ } },
+  };
+  const clamp = (x, a, b, d) => (Number.isFinite(+x) ? Math.min(b, Math.max(a, Math.round(+x))) : d);
+  const S = {
+    stars: clamp(LS.get("bingo.stars", 3), 1, 10, 3),
+    bonus: ["auto", "on", "off"].includes(LS.get("bingo.bonus", "auto")) ? LS.get("bingo.bonus", "auto") : "auto",
+    tab: LS.get("bingo.tab", "pick"),
+    planKey: LS.get("bingo.planKey", "mix"),
+    btLast: clamp(LS.get("bingo.btLast", 2000), 100, 1e6, 2000),
+    stop: false, focus: "mix", source: "sample", draws: [], H: null,
+    db: null, cloud: MODE === "server" ? "off" : "connecting", cloudDays: 0, cloudDraws: 0, res: {},
+    server: "connecting", srv: {}, srvAt: 0,
+  };
+  B.cfg.bonus = S.bonus;
+  const TABS = ["pick", "bt", "plan", "verify", "ev", "data"];
+  if (!TABS.includes(S.tab)) S.tab = "pick";
+
+  const fmtDate = (d) => (d && d.length === 10 ? `${+d.slice(5, 7)}/${+d.slice(8, 10)}` : "");
+  const drawTime = (s) => { const m = 7 * 60 + 5 + 5 * s; return `${p2(Math.floor(m / 60))}:${p2(m % 60)}`; };
+  const ball = (n, cls = "", badge = "") => `<span class="ball ${cls}">${p2(n)}${badge ? `<span class="st">${badge}</span>` : ""}</span>`;
+
+  // ───── 資料來源 ─────
+  function loadLocal() {
+    const raw = LS.raw("bingo.v1.csv");
+    if (!raw) return [];
+    try { return B.parseHistory(raw).draws; } catch (e) { return []; }
+  }
+  function saveLocal(draws) { return LS.setRaw("bingo.v1.csv", B.toCSV(draws)); }
+  function setData(draws, source) {
+    S.draws = draws; S.source = source; S.H = draws.length >= 3 ? new B.Hist(draws) : null; S.res = {};
+    render();
+  }
+
+  // ───── 伺服器（/bingo/api/draws）─────
+  let srvTimer = null;
+  function unpackRow(row) {
+    const [term, date, s] = row;
+    if (typeof s !== "string" || s.length !== 42) return null;
+    const xs = []; for (let j = 0; j < 42; j += 2) xs.push(+s.slice(j, j + 2));
+    const nums = xs.slice(0, 20);
+    return nums.every((n) => n >= 1 && n <= 80) && new Set(nums).size === 20 ? B.mkDraw(+term, date || "", nums, xs[20]) : null;
+  }
+  async function loadServer() {
+    clearTimeout(srvTimer);
+    let wait = 60000;
+    try {
+      const r = await fetch("/bingo/api/draws?days=7", { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const js = await r.json();
+      const draws = (js.draws || []).map(unpackRow).filter(Boolean);
+      S.srv = { updated: js.updated, checked: js.checked, error: js.error, count: draws.length };
+      S.srvAt = Date.now();
+      if (draws.length >= 3) {
+        S.server = "on";
+        const cur = S.draws[S.draws.length - 1];
+        const changed = S.source !== "server" || draws.length !== S.draws.length || !cur || cur.term !== draws[draws.length - 1].term;
+        saveLocal(draws);
+        if (changed) setData(draws, "server"); else renderStatus();
+      } else {
+        S.server = js.error ? "error" : "warming";
+        wait = js.error ? 60000 : 8000;
+        renderStatus();
+      }
+    } catch (e) {
+      S.server = "error"; S.srv = Object.assign({}, S.srv, { error: "連不到伺服器：" + (e.message || e) });
+      renderStatus();
+    }
+    srvTimer = setTimeout(() => { if (document.visibilityState === "visible") loadServer(); }, wait);
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (MODE === "server" && document.visibilityState === "visible" && Date.now() - S.srvAt > 30000) loadServer();
+  });
+
+  // ───── 雲端（db）─────
+  async function connectCloud() {
+    let db = null;
+    try { db = window.claude && typeof window.claude.use === "function" ? await window.claude.use("db") : null; } catch (e) { db = null; }
+    if (!db) { S.cloud = "off"; renderStatus(); return; }
+    S.db = db; S.cloud = "loading"; renderStatus();
+    try {
+      db.collection("days").limit(1000).onSnapshot((snap) => {
+        const draws = []; let days = 0;
+        for (const doc of snap.docs) { const ds = B.unpackDay(doc.data()); if (ds.length) { days++; draws.push(...ds); } }
+        const m = new Map(); for (const d of draws) m.set(d.term, d);
+        const all = [...m.keys()].sort((a, b) => a - b).map((k) => m.get(k));
+        S.cloud = "on"; S.cloudDays = days; S.cloudDraws = all.length;
+        S.pending = all;
+        if (!S.pushing) applyCloud();
+      }, (err) => { S.cloud = "error"; S.cloudErr = err && err.code; renderStatus(); });
+    } catch (e) { S.cloud = "error"; renderStatus(); }
+  }
+  function applyCloud() {
+    const all = S.pending; S.pending = null;
+    if (!all) return;
+    if (all.length) { saveLocal(all); setData(all, "cloud"); } else renderStatus();
+  }
+  async function writeDay(id, body) {
+    try { await S.db.doc("days/" + id).set(body); }
+    catch (e) {
+      if (e && e.code === "unavailable") { await new Promise((r) => setTimeout(r, 600 + Math.random() * 600)); await S.db.doc("days/" + id).set(body); }
+      else throw e;
+    }
+  }
+  async function pushDays(draws, dates, statusEl) {
+    if (!S.db || S.cloud !== "on") return false;
+    const byDate = new Map();
+    for (const d of draws) { const id = d.date || "undated"; if (dates.has(id)) { if (!byDate.has(id)) byDate.set(id, []); byDate.get(id).push(d); } }
+    let i = 0;
+    S.pushing = true;
+    try {
+      for (const [id, ds] of byDate) {
+        i++; if (statusEl) setStatus(statusEl, `存到雲端中 ${i}/${byDate.size}…`);
+        await writeDay(id, B.packDay(ds));
+      }
+    } finally { S.pushing = false; applyCloud(); }
+    return true;
+  }
+  function cloudErrText(e) {
+    const c = e && e.code;
+    if (c === "invalid_argument") return "你的權限只能讀取雲端資料，這次的資料只存在這台裝置。";
+    if (c === "quota_exceeded") return "雲端空間已滿，請先清除較舊的資料。";
+    return "雲端暫時存不進去，資料先存在這台裝置，稍後再按一次上傳。";
+  }
+  async function importDraws(incoming, statusEl, label) {
+    const base = S.source === "sample" ? [] : S.draws;
+    const before = new Map(base.map((d) => [d.term, d]));
+    const merged = B.mergeDraws(base, incoming);
+    const dates = new Set(merged.filter((d) => before.get(d.term) !== d).map((d) => d.date || "undated"));
+    const added = merged.length - base.length;
+    saveLocal(merged);
+    setData(merged, S.cloud === "on" ? "cloud" : "local");
+    setStatus(statusEl, `${label}：新增 ${added} 期，共 ${merged.length} 期`, "ok");
+    if (S.cloud === "on" && dates.size) {
+      try { await pushDays(merged, dates, statusEl); setStatus(statusEl, `${label}：新增 ${added} 期，已存到雲端（共 ${merged.length} 期）`, "ok"); }
+      catch (e) { setStatus(statusEl, cloudErrText(e), "err"); }
+    }
+  }
+  function setStatus(el, txt, kind) { if (!el) return; el.textContent = txt; el.className = "status" + (kind ? " " + kind : ""); }
+
+  // ───── 共用控制項 ─────
+  function starSeg(el) {
+    el.innerHTML = Array.from({ length: 10 }, (_, i) => `<button type="button" data-k="${i + 1}" aria-pressed="${S.stars === i + 1}">${i + 1}</button>`).join("");
+  }
+  function bonusSeg() {
+    const opts = [["auto", "依開獎日期"], ["on", "全部用加碼"], ["off", "不加碼"]];
+    $$(".bonus-seg").forEach((el) => { el.innerHTML = opts.map(([v, t]) => `<button type="button" data-bonus="${v}" aria-pressed="${S.bonus === v}">${t}</button>`).join(""); });
+  }
+
+  // ───── 繪製 ─────
+  function renderStatus() {
+    const H = S.H;
+    const src = { sample: "範例資料", local: "這台裝置", cloud: "雲端", server: "自動更新" }[S.source];
+    $("#meta").textContent = H ? `${H.T.toLocaleString()} 期｜最新 ${H.draws[H.T - 1].term}（${fmtDate(H.draws[H.T - 1].date)}）｜${src}` : "還沒有開獎資料";
+    const d = H ? H.slotOf(H.T)[0] || B.todayTPE() : B.todayTPE();
+    const st = B.promoStatus(B.todayTPE() > d ? B.todayTPE() : d);
+    const chips = [];
+    for (const p of st.now) {
+      const items = [];
+      if (p.basic) items.push("1~6 星 9 獎項");
+      if (p.sup) items.push(`超級獎號 <b>${p.sup.toLocaleString()}</b>`);
+      if (p.bs) items.push(`猜大小／單雙 <b>${p.bs}</b>`);
+      chips.push(`<span class="chip promo">${p.name} ${fmtDate(p.start)}–${fmtDate(p.end)}：${items.join("、")}</span>`);
+    }
+    if (st.next) chips.push(`<span class="chip promo">下一檔 ${st.next.name} <b>${fmtDate(st.next.start)}–${fmtDate(st.next.end)}</b>${st.next.basic ? "：1~6 星加碼（3星中3 1,000、4星中4 2,000）" : ""}</span>`);
+    if (!st.now.length && !st.next) chips.push(`<span class="chip">目前沒有加碼</span>`);
+    if (S.source === "sample") chips.push(`<span class="chip sample">範例資料</span>`);
+    if (MODE === "server") {
+      const at = S.srv.updated ? S.srv.updated.slice(11, 16) : "";
+      const srvTxt = { connecting: "連線伺服器中", warming: "伺服器正在抓台彩資料…", on: `自動更新・${at}`, error: "台彩資料抓取失敗" }[S.server];
+      chips.push(`<span class="chip cloud">${srvTxt}</span>`);
+    } else {
+      const cloudTxt = { connecting: "雲端連線中", loading: "讀取雲端…", on: "雲端已同步", off: "只存在這台裝置", error: "雲端讀取失敗" }[S.cloud];
+      chips.push(`<span class="chip cloud">${cloudTxt}</span>`);
+    }
+    $("#chips").innerHTML = chips.join("");
+    $("#sample-banner").hidden = S.source !== "sample" || (MODE === "server" && S.server !== "error");
+    renderDataInfo();
+  }
+
+  function renderPick() {
+    const H = S.H; if (!H) return;
+    const t = H.T, last = H.draws[t - 1], k = S.stars;
+    const [nd, ns] = H.slotOf(t);
+    $("#next-term").textContent = last.term + 1;
+    $("#next-when").textContent = nd ? `${fmtDate(nd)} 當天第 ${ns + 1} 期・約 ${ns < 203 ? drawTime(ns) : "07:05"} 開獎` : "";
+    starSeg($("#stars"));
+    const rep = H.repCount(t);
+    const rows = []; const picksBy = {};
+    for (const key of B.PICK_KEYS) {
+      const st = B.STRATS[key];
+      const ps = B.pick(H, t, key, k);
+      picksBy[key] = ps;
+      let body, note = "";
+      if (!ps) {
+        const need = key === "direct" ? `要少於 ${st.params.max_rep + 1} 顆` : `要 ${st.params.min_rep} 顆以上`;
+        body = `<span class="pill">這期不下注・上期重複 ${rep} 顆（${need}）</span>`;
+      } else {
+        body = `<div class="balls">${ps.slice().sort((a, b) => a - b).map((n) => ball(n, S.focus === key ? "pick" : "")).join("")}</div>`;
+        if (key === "tail") note = `← ${[...new Set(ps.map((n) => n % 10))].join("、")} 尾`;
+        if (key === "qp_nb") note = `電選 ${ps.map((n) => ((n + 78) % 80) + 1).sort((a, b) => a - b).map(p2).join(" ")} 的隔壁，兩組一起追`;
+        if (key === "direct") note = "觸發了：上期重複不到 2 顆";
+      }
+      rows.push(`<li class="strat" role="button" tabindex="0" data-key="${key}" aria-pressed="${S.focus === key}">
+        <div class="strat-head"><span class="strat-name">${st.name}</span><span class="src">${st.src}</span></div>
+        ${body}${note ? `<span class="strat-note">${note}</span>` : ""}
+        <span class="strat-note">${st.desc}</span></li>`);
+    }
+    $("#strats").innerHTML = rows.join("");
+
+    // 號碼盤
+    const c20 = H.freq(t, 20); let mx = 1; for (let n = 1; n <= 80; n++) mx = Math.max(mx, c20[n]);
+    const focus = new Set(picksBy[S.focus] || []);
+    const sp = B.pick(H, t, "super", 2) || [];
+    const sps = new Set(sp);
+    let cells = "";
+    for (let n = 1; n <= 80; n++) {
+      const cls = ["cell", last.has[n] ? "last" : "", focus.has(n) ? "pick" : "", sps.has(n) ? "sup" : ""].join(" ");
+      cells += `<div class="${cls}" style="--h:${(c20[n] / mx).toFixed(2)}" title="${p2(n)}：近20期開 ${c20[n]} 次">${p2(n)}</div>`;
+    }
+    $("#board").innerHTML = cells;
+    $("#board-sub").textContent = `標示：${B.STRATS[S.focus].name}`;
+
+    // 超級獎號
+    const sup5 = H.draws.slice(-5).map((d) => d.sup).filter(Boolean);
+    $("#sup-balls").innerHTML = sp.length ? sp.map((n) => ball(n, "sup lg")).join("") : `<span class="pill">資料不足</span>`;
+    const three = B.pick(H, t, "super", 3) || [];
+    $("#sup-info").innerHTML = sp.length ? `
+      <dt>近 5 期</dt><dd>${sup5.map(p2).join(" ")}</dd>
+      <dt>已排除</dt><dd>上期 ${p2(last.sup)}、±2、距離超過 45</dd>
+      <dt>選邊</dt><dd>${sp[0] >= 41 ? "大號（41–80）" : "小號（01–40）"}・依近 3 期大小平衡</dd>
+      <dt>順便丟三星</dt><dd>${three.slice().sort((a, b) => a - b).map(p2).join(" ")}（三版8）</dd>` : "";
+
+    // 猜大小
+    const sig = B.bsSignal(H, t);
+    $("#bs-dir").textContent = sig.dir;
+    const go = sig.drought >= 15 && sig.slotOk;
+    $("#bs-advice").innerHTML = go ? `<span class="pill go">可進場：6 倍追 4 期</span>` : `<span class="pill">觀望</span><div class="note" style="margin-top:4px">要 15 期以上沒開大小，且本週同時段開過</div>`;
+    $("#bs-info").innerHTML = `
+      <dt>依據</dt><dd>${sig.votes.map(([a, b]) => `${a}→${b}`).join("、") || "－"}</dd>
+      <dt>連續沒開</dt><dd>${sig.drought} 期</dd>
+      <dt>近 7 天同時段</dt><dd><span class="slotseq">${sig.slot.length ? sig.slot.map((x) => `<span class="${x === "－" ? "" : "on"}">${x}</span>`).join("") : "無資料"}</span></dd>`;
+
+    // 上一期
+    const prev = H.draws[t - 2], st = H.streaks(t);
+    $("#last-sub").textContent = `${last.term}（${fmtDate(last.date)}）`;
+    $("#last-balls").innerHTML = last.nums.slice().sort((a, b) => a - b).map((n) => ball(n, prev.has[n] ? "rep" : "", st[n] >= 2 ? "連" + st[n] : "")).join("");
+    const big = last.nums.filter((n) => n >= 41).length;
+    const g = H.gaps(t); const cold = [];
+    for (let n = 1; n <= 80; n++) if (g[n] >= 10) cold.push(n);
+    cold.sort((a, b) => g[b] - g[a] || a - b);
+    const hot = Array.from({ length: 80 }, (_, i) => i + 1).sort((a, b) => c20[b] - c20[a] || a - b).slice(0, 10);
+    $("#last-info").innerHTML = `
+      <dt>超級獎號</dt><dd>${last.sup ? p2(last.sup) : "－"}</dd>
+      <dt>與前期重複</dt><dd>${rep} 顆（紅框；一版：通常 3~5 顆）</dd>
+      <dt>大小／單雙</dt><dd>大號 ${big} 顆・猜大小「${B.bigSmall(last)}」・猜單雙「${B.oddEven(last)}」</dd>
+      <dt>熱門前十</dt><dd>${hot.map((n) => `${p2(n)}(${c20[n]})`).join(" ")}</dd>
+      <dt>10 期未開</dt><dd>${cold.length ? cold.map((n) => `${p2(n)}(${g[n]})`).join(" ") : "無"}</dd>`;
+  }
+
+  function bonusNote(r) {
+    if (S.bonus === "on") return "獎金全部用加碼金額計算";
+    if (S.bonus === "off") return "獎金全部用平常金額計算";
+    return `依開獎日期套用加碼（期間內 1~6 星加碼 ${r.promoDraws.basic} 期、超級獎號／猜大小加碼 ${r.promoDraws.sup} 期）`;
+  }
+  function renderBT() {
+    starSeg($("#stars2")); bonusSeg();
+    $("#bt-last").innerHTML = [500, 1000, 2000, 5000].map((v) => `<button type="button" data-last="${v}" aria-pressed="${S.btLast === v}">${v.toLocaleString()} 期</button>`).join("");
+    const H = S.H; if (!H) return;
+    const key = `bt|${S.stars}|${S.btLast}|${S.bonus}`;
+    if (S.res.bt && S.res.bt.key === key) return paintBT(S.res.bt.r);
+    $("#bt-out").innerHTML = `<p class="note">計算中…</p>`;
+    setTimeout(() => { const r = B.backtest(H, S.stars, B.PICK_KEYS.concat(["random"]), S.btLast, 60); S.res.bt = { key, r }; if (S.tab === "bt") paintBT(r); }, 30);
+  }
+  function paintBT(r) {
+    if (!r) { $("#bt-out").innerHTML = `<p class="note">資料不足，至少要 61 期。</p>`; return; }
+    const [pw, ev] = r.theory;
+    let h = `<p class="note" style="margin-bottom:8px">${r.from} ~ ${r.to}，共 ${r.n.toLocaleString()} 期｜${S.stars} 星｜${bonusNote(r)}</p>
+      <table><thead><tr><th>策略</th><th>下注期數</th><th>平均中幾個</th><th>z 值</th><th>中獎率</th><th>回收率</th><th>中獎分布（中幾個:期數）</th></tr></thead><tbody>
+      <tr class="theory"><td>理論值（隨機）</td><td></td><td>${(S.stars / 4).toFixed(3)}</td><td>0.00</td><td>${pct(pw)}</td><td>${pct(ev)}</td><td class="dist"></td></tr>`;
+    for (const row of r.rows) {
+      if (!row.m) { h += `<tr><td>${row.name}</td><td>0</td><td colspan="5" class="dist">期間內沒觸發</td></tr>`; continue; }
+      const dist = Object.keys(row.dist).map(Number).sort((a, b) => a - b).map((x) => `${x}:${row.dist[x]}`).join(" ");
+      h += `<tr><td>${row.name}</td><td>${row.m.toLocaleString()}</td><td>${row.avg.toFixed(3)}</td><td><span class="${Math.abs(row.z) >= 2 ? "z-hi" : ""}">${row.z.toFixed(2)}</span></td><td>${pct(row.win)}</td><td>${pct(row.roi)}<span class="roi-bar ${row.roi >= 1 ? "over" : ""}" style="width:${Math.min(60, row.roi * 40).toFixed(0)}px"></span></td><td class="dist">${dist}</td></tr>`;
+    }
+    h += `</tbody></table>`;
+    if (r.sup.n) h += `<p style="margin-top:12px">超級獎號 2 碼（${r.sup.n.toLocaleString()} 期）：三版策略命中 <b>${pct(r.sup.super, 2)}</b>｜電選 ${pct(r.sup.random, 2)}｜理論 2.50%</p>`;
+    if (r.bs.n) h += `<p>猜大小方向（${r.bs.n.toLocaleString()} 期有開大小）：猜中 <b>${pct(r.bs.acc)}</b>｜理論 50.0%</p>`;
+    $("#bt-out").innerHTML = h;
+  }
+
+  function renderPlan() {
+    bonusSeg();
+    const sel = $("#plan-key");
+    const opts = B.PICK_KEYS.filter((k) => k !== "direct").concat(["random"]);
+    if (!opts.includes(S.planKey)) S.planKey = "mix";
+    sel.innerHTML = opts.map((k) => `<option value="${k}" ${k === S.planKey ? "selected" : ""}>${B.STRATS[k].name}</option>`).join("");
+    $("#plan-stop").innerHTML = [[false, "每期都買滿"], [true, "中了就停"]].map(([v, t]) => `<button type="button" data-stop="${v}" aria-pressed="${S.stop === v}">${t}</button>`).join("");
+    const H = S.H; if (!H) return;
+    const key = `plan|${S.planKey}|${S.stop}|${S.bonus}`;
+    if (S.res.plan && S.res.plan.key === key) return paintPlan(S.res.plan.r);
+    $("#plan-out").innerHTML = `<p class="note">計算中…</p>`;
+    setTimeout(() => {
+      const keys = S.planKey === "random" ? ["random"] : [S.planKey, "random"];
+      const r = B.plans(H, keys, 2000, 60, S.stop); S.res.plan = { key, r }; if (S.tab === "plan") paintPlan(r);
+    }, 30);
+  }
+  function paintPlan(r) {
+    let h = `<p class="note" style="margin-bottom:8px">${r.from} ~ ${r.to}（${r.n.toLocaleString()} 期）｜${S.stop ? "中了就停" : "每期都買滿"}</p>
+      <table><thead><tr><th>方案（出處）</th><th>選號</th><th>輪數</th><th>至少中 1 次</th><th>賺錢的輪</th><th>平均成本</th><th>平均獎金</th><th>回收率</th></tr></thead><tbody>`;
+    for (const row of r.rows) {
+      row.res.forEach((x, i) => {
+        h += `<tr class="${i === 0 ? "grp" : ""}"><td>${i === 0 ? `${row.plan.name}<span class="muted">（${row.plan.src}）</span>` : ""}</td><td>${x.name}</td><td>${x.rounds.toLocaleString()}</td><td>${x.rounds ? pct(x.anyWin) : "－"}</td><td>${x.rounds ? pct(x.profit) : "－"}</td><td>${x.rounds ? money(x.avgCost) : "－"}</td><td>${x.rounds ? money(x.avgPay) : "－"}</td><td>${x.rounds ? pct(x.roi) : "－"}</td></tr>`;
+      });
+      h += `<tr class="theory"><td></td><td>理論值</td><td></td><td>${pct(row.theory.anyWin)}</td><td></td><td></td><td></td><td>${pct(row.theory.roi)}</td></tr>`;
+    }
+    h += `</tbody></table><p class="note" style="margin-top:10px">回收率低於 100% ＝ 長期會虧。每一注的期望值固定，追幾期、幾倍只改變輸贏起伏。</p>`;
+    $("#plan-out").innerHTML = h;
+  }
+
+  function renderVerify() {
+    const H = S.H; if (!H) return;
+    $("#verify-sub").textContent = `用 ${H.T.toLocaleString()} 期開獎資料（${H.draws[0].term} ~ ${H.draws[H.T - 1].term}）檢驗貼文每一條可以量化的說法，旁邊是純隨機的理論值。兩者差不多，代表那條說法只是機率本來的樣子。`;
+    if (S.res.verify) return paintVerify(S.res.verify);
+    $("#verify-out").innerHTML = `<p class="note">計算中…</p>`;
+    setTimeout(() => { S.res.verify = B.verify(H); if (S.tab === "verify") paintVerify(S.res.verify); }, 30);
+  }
+  function paintVerify(rows) {
+    $("#verify-out").innerHTML = rows.map((r) => `<div class="claim"><div class="row"><span class="src">${r.src}</span><b>${r.claim}</b></div>
+      <div class="cmp"><b>實際</b><span>${r.real}</span><b>純隨機</b><span>${r.theo}</span></div></div>`).join("");
+  }
+
+  function renderEV() {
+    const e = B.evTable();
+    let h = `<table><thead><tr><th>玩法</th><th>中獎率</th><th>回收率（平常）</th><th>回收率（加碼）</th><th>加碼獎項</th></tr></thead><tbody>`;
+    for (const s of e.stars) h += `<tr><td>${s.k} 星</td><td>${pct(s.pwin)}</td><td>${pct(s.ev0)}</td><td>${s.items.length ? `<b>${pct(s.ev1)}</b>` : pct(s.ev1)}</td><td style="text-align:left" class="muted">${s.items.map((x) => `中${x.h} ${x.from.toLocaleString()}→${x.to.toLocaleString()}`).join("、")}</td></tr>`;
+    h += `<tr class="grp"><td>超級獎號</td><td>${pct(e.sup.p, 2)}</td><td>${pct(e.sup.ev0)}</td><td><b>${pct(e.sup.ev1)}</b></td><td style="text-align:left" class="muted">1,200→1,500</td></tr>`;
+    h += `<tr><td>猜大小</td><td>${pct(e.bs.p)}</td><td>${pct(e.bs.ev0)}</td><td><b>${pct(e.bs.ev1)}</b></td><td style="text-align:left" class="muted">150→175</td></tr></tbody></table>`;
+    $("#ev-stars").innerHTML = h;
+    let c = `<table><thead><tr><th>方案</th><th>成本</th><th>至少中 1 次</th><th>一期最高可領（平常→加碼）</th><th>平均拿回（平常→加碼）</th></tr></thead><tbody>`;
+    for (const x of e.chase) c += `<tr><td>${x.name}</td><td>${money(x.cost)}</td><td>${pct(x.anyWin)}</td><td>${x.top}</td><td>${money(x.back0)}→${money(x.back1)}</td></tr>`;
+    $("#ev-chase").innerHTML = c + `</tbody></table>`;
+    const st = B.promoStatus(B.todayTPE());
+    $("#ev-promo").textContent = "今天：" + (st.now.length ? st.now.map((p) => `${p.name}（${fmtDate(p.start)}–${fmtDate(p.end)}）`).join("、") : "沒有加碼") + (st.next ? `｜下一檔：${st.next.name} ${fmtDate(st.next.start)}–${fmtDate(st.next.end)}` : "") + "。貼文寫的「期望值」是加碼時中獎一期可領的金額，平均拿回看最右欄。";
+  }
+
+  function renderDataInfo() {
+    const H = S.H, el = $("#data-info"); if (!el) return;
+    const src = { sample: "範例資料（隨機模擬）", local: "這台裝置", cloud: "雲端（所有裝置共用）", server: "伺服器自動抓取（台彩）" }[S.source];
+    $("#server-card").hidden = MODE !== "server";
+    $("#py-hint").hidden = MODE === "server";
+    if (MODE === "server") {
+      const fmt = (x) => (x ? `${fmtDate(x.slice(0, 10))} ${x.slice(11, 19)}` : "－");
+      $("#server-info").innerHTML = `<dt>最後成功</dt><dd>${fmt(S.srv.updated)}</dd><dt>最後檢查</dt><dd>${fmt(S.srv.checked)}</dd>
+        <dt>近 7 天</dt><dd>${(S.srv.count || 0).toLocaleString()} 期</dd>${S.srv.error ? `<dt>錯誤</dt><dd style="color:var(--accent)">${String(S.srv.error).replace(/[<>&]/g, "")}</dd>` : ""}`;
+    }
+    if (!H) { el.innerHTML = `<dt>資料</dt><dd>還沒有，請用下方方式匯入</dd>`; return; }
+    const days = new Set(H.draws.map((d) => d.date)).size;
+    el.innerHTML = `<dt>來源</dt><dd>${src}</dd><dt>期數</dt><dd>${H.T.toLocaleString()} 期・${days} 天</dd>
+      <dt>範圍</dt><dd>${H.draws[0].term}（${fmtDate(H.draws[0].date)}）～ ${H.draws[H.T - 1].term}（${fmtDate(H.draws[H.T - 1].date)}）</dd>`;
+    const cs = $("#cloud-status");
+    if (MODE === "server") setStatus(cs, "");
+    else if (S.cloud === "on") setStatus(cs, `雲端：${S.cloudDays} 天、${S.cloudDraws.toLocaleString()} 期。在電腦上傳後，手機打開就是同一份。`, "ok");
+    else if (S.cloud === "off") setStatus(cs, "這個檢視無法使用雲端，資料只存在這台裝置的瀏覽器。");
+    else if (S.cloud === "error") setStatus(cs, "雲端讀取失敗，先顯示這台裝置的資料。重新整理頁面再試一次。", "err");
+    else setStatus(cs, "正在連線雲端…");
+    $("#push-local").hidden = !(S.cloud === "on" && S.source === "local" && S.draws.length);
+    $("#clear-cloud").hidden = !(S.cloud === "on" && S.cloudDays > 0);
+  }
+
+  function render() {
+    for (const tb of TABS) {
+      $("#p-" + tb).hidden = S.tab !== tb;
+      $("#t-" + tb).setAttribute("aria-selected", String(S.tab === tb));
+    }
+    renderStatus();
+    if (!S.H) return;
+    if (S.tab === "pick") renderPick();
+    else if (S.tab === "bt") renderBT();
+    else if (S.tab === "plan") renderPlan();
+    else if (S.tab === "verify") renderVerify();
+    else if (S.tab === "ev") renderEV();
+  }
+
+  // ───── 事件 ─────
+  document.addEventListener("click", (ev) => {
+    const tg = ev.target.closest("[data-tab],[data-go],[data-k],[data-bonus],[data-last],[data-stop],.strat");
+    if (!tg) return;
+    if (tg.dataset.tab || tg.dataset.go) { S.tab = tg.dataset.tab || tg.dataset.go; LS.set("bingo.tab", S.tab); render(); window.scrollTo(0, 0); return; }
+    if (tg.dataset.k) { S.stars = +tg.dataset.k; LS.set("bingo.stars", S.stars); render(); return; }
+    if (tg.dataset.bonus) { S.bonus = tg.dataset.bonus; B.cfg.bonus = S.bonus; LS.set("bingo.bonus", S.bonus); S.res.bt = null; S.res.plan = null; render(); return; }
+    if (tg.dataset.last) { S.btLast = +tg.dataset.last; LS.set("bingo.btLast", S.btLast); render(); return; }
+    if (tg.dataset.stop) { S.stop = tg.dataset.stop === "true"; render(); return; }
+    if (tg.classList.contains("strat")) { S.focus = tg.dataset.key; renderPick(); }
+  });
+  document.addEventListener("keydown", (ev) => {
+    const tg = ev.target.closest && ev.target.closest(".strat");
+    if (tg && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); S.focus = tg.dataset.key; renderPick(); }
+  });
+  $("#plan-key").addEventListener("change", (ev) => { S.planKey = ev.target.value; LS.set("bingo.planKey", S.planKey); render(); });
+
+  $("#quick-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const st = $("#q-status");
+    const txt = $("#q-nums").value.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+    const xs = (txt.match(/\d+/g) || []).map(Number);
+    let nums = xs.filter((n) => n >= 1 && n <= 80);
+    let sup = +$("#q-sup").value || 0;
+    if (nums.length === 21 && !sup) { sup = nums[20]; nums = nums.slice(0, 20); }
+    if (nums.length !== 20 || new Set(nums).size !== 20) { setStatus(st, `要剛好 20 個不重複的 1～80 號碼，現在有 ${nums.length} 個`, "err"); return; }
+    if (sup && (sup < 1 || sup > 80)) { setStatus(st, "超級獎號要在 1～80 之間", "err"); return; }
+    const term = +$("#q-term").value || 0;
+    const date = $("#q-date").value || B.todayTPE();
+    importDraws([B.mkDraw(term >= 100000 ? term : 1, date, nums, sup)], st, "新增一期").then(() => { $("#q-nums").value = ""; $("#q-sup").value = ""; $("#q-term").value = ""; });
+  });
+  $("#paste-go").addEventListener("click", () => {
+    const st = $("#paste-status");
+    const r = B.parseHistory($("#paste").value);
+    if (!r.draws.length) { setStatus(st, "沒有讀到任何一期。每一列要有 20 個 1～80 的號碼。", "err"); return; }
+    importDraws(r.draws, st, `匯入 ${r.draws.length} 期${r.bad ? `（略過 ${r.bad} 列）` : ""}`).then(() => { $("#paste").value = ""; });
+  });
+  $("#file").addEventListener("change", (ev) => {
+    const f = ev.target.files && ev.target.files[0]; const st = $("#paste-status");
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      let text = "";
+      try { text = new TextDecoder("utf-8", { fatal: true }).decode(rd.result); }
+      catch (e) { try { text = new TextDecoder("big5").decode(rd.result); } catch (e2) { text = new TextDecoder("utf-8").decode(rd.result); } }
+      const r = B.parseHistory(text);
+      if (!r.draws.length) { setStatus(st, `${f.name} 沒有讀到任何一期`, "err"); return; }
+      importDraws(r.draws, st, `${f.name}：讀到 ${r.draws.length} 期${r.bad ? `（略過 ${r.bad} 列）` : ""}`);
+      ev.target.value = "";
+    };
+    rd.onerror = () => setStatus(st, "檔案讀取失敗，再選一次", "err");
+    rd.readAsArrayBuffer(f);
+  });
+  $("#server-refresh").addEventListener("click", async () => {
+    setStatus($("#server-status"), "更新中…");
+    await loadServer();
+    setStatus($("#server-status"), S.server === "on" ? "已更新" : "還沒有資料，稍後再試", S.server === "on" ? "ok" : "err");
+  });
+  $("#push-local").addEventListener("click", async () => {
+    const st = $("#cloud-status");
+    try { await pushDays(S.draws, new Set(S.draws.map((d) => d.date || "undated")), st); setStatus(st, "已上傳到雲端", "ok"); }
+    catch (e) { setStatus(st, cloudErrText(e), "err"); }
+  });
+  function twoStep(btn, label, action) {
+    let armed = false, timer = null;
+    btn.addEventListener("click", async () => {
+      if (!armed) { armed = true; btn.textContent = "確定？再按一次"; timer = setTimeout(() => { armed = false; btn.textContent = label; }, 4000); return; }
+      clearTimeout(timer); armed = false; btn.textContent = label; await action();
+    });
+  }
+  twoStep($("#clear-local"), "清除這台裝置的資料", async () => {
+    LS.del("bingo.v1.csv");
+    setStatus($("#clear-status"), "已清除這台裝置的資料", "ok");
+    if (S.source !== "cloud") setData(B.sampleDraws(3), "sample");
+  });
+  twoStep($("#clear-cloud"), "清除雲端資料", async () => {
+    const st = $("#clear-status");
+    try {
+      const snap = await S.db.collection("days").limit(1000).get();
+      let i = 0;
+      for (const doc of snap.docs) { i++; setStatus(st, `清除中 ${i}/${snap.size}…`); await S.db.doc("days/" + doc.id).delete(); }
+      LS.del("bingo.v1.csv");
+      setStatus(st, "已清除雲端資料", "ok");
+      setData(B.sampleDraws(3), "sample");
+    } catch (e) { setStatus(st, cloudErrText(e), "err"); }
+  });
+
+  // ───── 開始 ─────
+  $("#q-date").value = B.todayTPE();
+  const local = loadLocal();
+  if (local.length >= 3) setData(local, "local"); else setData(B.sampleDraws(3), "sample");
+  if (MODE === "server") loadServer(); else connectCloud();
+})();
+</script>

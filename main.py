@@ -1180,3 +1180,11 @@ async def test_playwright():
 @app.get("/control", response_class=HTMLResponse)
 async def control_panel():
     return HTMLResponse(content=open("/app/control.html", "r", encoding="utf-8").read())
+
+
+# 賓果攻略選號台（/bingo）：伺服器抓台彩開獎資料，手機在外面也能用；載入失敗不影響 bot
+try:
+    from bingo.web import router as bingo_router
+    app.include_router(bingo_router)
+except Exception as e:
+    logger.warning("bingo router disabled: %s", e)
