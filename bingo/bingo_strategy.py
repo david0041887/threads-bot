@@ -184,7 +184,7 @@ def parse_api_record(d: dict):
             break
     if not sup and order:
         sup = order[-1]
-    dt = next((str(d[k])[:10].replace("/", "-") for k in DATE_KEYS if d.get(k)), "")
+    dt = next((x for x in (_norm_date(str(d[k])) for k in DATE_KEYS if d.get(k)) if x), "")
     return Draw(term, dt, tuple(nums), sup)
 
 
@@ -237,7 +237,8 @@ def fetch_day(day: date) -> list:
     if not got and last_js is not None:
         with open(os.path.join(HERE, "bingo_api_debug.json"), "w", encoding="utf-8") as f:
             json.dump(last_js, f, ensure_ascii=False, indent=1)
-    return list(got.values())
+    # 台彩 API 的 dDate 是 0001-01-01（無效），改用查詢的日期
+    return [r if r.date else Draw(r.term, day.isoformat(), r.nums, r.super_no) for r in got.values()]
 
 
 # ───────────── CSV / TXT 匯入（格式自動偵測） ─────────────
@@ -249,7 +250,10 @@ def _norm_date(s: str) -> str:
     m = DATE_RE.search(s or "")
     if not m:
         return ""
-    y, mo, d = map(int, m.groups())
+    ys, mo, d = m.groups()
+    y, mo, d = int(ys), int(mo), int(d)
+    if len(ys) == 4 and y < 1911:  # 無效日期（例：台彩 API 的 0001-01-01）
+        return ""
     if y < 1911:  # 民國年
         y += 1911
     return f"{y:04d}-{mo:02d}-{d:02d}"

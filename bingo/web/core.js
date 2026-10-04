@@ -48,6 +48,7 @@
     const m = DATE_RE.exec(s || "");
     if (!m) return "";
     let y = +m[1]; const mo = +m[2], d = +m[3];
+    if (m[1].length === 4 && y < 1911) return ""; // 無效日期（例：0001-01-01）
     if (y < 1911) y += 1911;
     return `${String(y).padStart(4, "0")}-${pad2(mo)}-${pad2(d)}`;
   }
