@@ -33,6 +33,7 @@ NO_STORE = {"Cache-Control": "no-store"}
 
 _draws: dict[int, bs.Draw] = {}
 _state = {"loaded": False, "last_fetch": None, "last_ok": None, "last_error": None, "window": 7, "last_seen": 0.0}
+_done_days: set = set()   # 已完整抓過的過去日期
 _task: asyncio.Task | None = None
 
 
@@ -47,7 +48,8 @@ def _load_cache() -> None:
     try:
         if CACHE_PATH.exists():
             for d in bs.load_history(str(CACHE_PATH)):
-                _draws[d.term] = d
+                if d.date:
+                    _draws[d.term] = d
     except Exception as e:  # 快取壞掉就重抓
         log.warning("bingo cache load failed: %s", e)
 
@@ -62,14 +64,16 @@ def _save_cache(draws: list) -> None:
 
 def _fetch_days(days: list) -> tuple:
     """在執行緒裡跑（阻塞 I/O）；只回傳結果，不動共用資料"""
-    got, errors = [], []
+    got, errors, ok_days = [], [], []
     for day in days:
         try:
-            for r in bs.fetch_day(day):
-                got.append(r if r.date else bs.Draw(r.term, day.isoformat(), r.nums, r.super_no))
+            rs = bs.fetch_day(day)
+            got += [r if r.date else bs.Draw(r.term, day.isoformat(), r.nums, r.super_no) for r in rs]
+            if rs:
+                ok_days.append(day.isoformat())
         except Exception as e:
             errors.append(f"{day}: {type(e).__name__}: {e}")
-    return got, errors
+    return got, errors, ok_days
 
 
 def _missing_days(window: int) -> list:
@@ -77,15 +81,17 @@ def _missing_days(window: int) -> list:
     today = _now_tpe().date()
     counts = Counter(d.date for d in _draws.values())
     past = [today - timedelta(days=i) for i in range(1, window)]
-    return [today] + [d for d in past if counts.get(d.isoformat(), 0) < DRAWS_PER_DAY][:3]
+    return [today] + [d for d in past if d.isoformat() not in _done_days and counts.get(d.isoformat(), 0) < DRAWS_PER_DAY][:3]
 
 
 async def _refresh_once() -> None:
     _load_cache()
     days = _missing_days(_state["window"])
-    got, errors = await asyncio.wait_for(asyncio.to_thread(_fetch_days, days), timeout=180)
+    got, errors, ok_days = await asyncio.wait_for(asyncio.to_thread(_fetch_days, days), timeout=180)
     for r in got:
         _draws[r.term] = r
+    today = _now_tpe().date().isoformat()
+    _done_days.update(d for d in ok_days if d < today)
     _state["last_fetch"] = _now_tpe().isoformat(timespec="seconds")
     if got:
         _state["last_ok"] = _state["last_fetch"]
